@@ -1,0 +1,27 @@
+# Backend container image for Django + gunicorn.
+# Startup runs migrate/collectstatic/ensure_superuser before gunicorn.
+
+FROM python:3.11-slim
+
+# System packages required by psycopg2 build/runtime.
+RUN apt-get update && apt-get install -y \
+    libpq-dev gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install Python dependencies first for better build caching.
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+RUN mkdir -p /app/staticfiles
+
+EXPOSE 8000
+
+# Start app with non-interactive management commands and gunicorn.
+CMD python manage.py migrate --noinput && \
+    python manage.py collectstatic --noinput && \
+    python manage.py ensure_superuser && \
+    gunicorn wsgi:application --bind 0.0.0.0:8000 --workers 2 --timeout 120

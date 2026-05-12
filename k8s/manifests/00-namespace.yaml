@@ -1,0 +1,9 @@
+# Namespace shared by all application resources.
+# Keep this manifest first in apply order.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: storage-system
+  labels:
+    name: storage-system
+    app: s3-bucket-manager

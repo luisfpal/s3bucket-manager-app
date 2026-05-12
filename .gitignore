@@ -1,0 +1,63 @@
+# Agent/AI context (local to VM, not project code)
+GEMINI.md
+CLAUDE.md
+.codex
+.gemini/
+.claude/
+
+# Internal docs
+internal_docs/
+
+# Generated walkthroughs/guides that duplicate README.md content
+walkthrough.md
+
+# Python
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Django
+db.sqlite3
+staticfiles/
+*.log
+backend/storage/migrations/
+backend/storage/management/
+
+# Node / Frontend
+node_modules/
+frontend/dist/
+frontend/node_modules/
+
+# Container image tarballs
+*.tar
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.local
+
+# K8s environment local overrides (real credentials)
+k8s/env/**/*.local.yaml
+k8s/env/**/*.local.json
+
+# Local deployment release artifacts
+k8s/releases/

@@ -1,0 +1,17 @@
+S3 Bucket Manager
+
+Copyright (c) 2026 AREA Science Park.
+Author: Luis Fernando Palacios Flores.
+
+This project was developed as part of a Master in Data Management and
+Curation internship conducted at the Laboratory of Data Engineering,
+AREA Science Park.
+
+The application was developed and validated in the Stencil virtual
+datacenter: a virtualized multi-node environment with Kubernetes, Ceph
+RADOS Gateway object storage, and identity/networking services used to
+approximate production infrastructure during internship development.
+
+Intended publication license: European Union Public Licence, version 1.2 or
+later (EUPL-1.2-or-later). Confirm AREA Science Park approval before
+publishing the repository under this license.

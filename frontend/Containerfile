@@ -1,0 +1,46 @@
+# ==============================================================================
+# Frontend Containerfile — Multi-Stage Build (React SPA → nginx)
+# ==============================================================================
+#
+# This builds the frontend container image with a two-stage process:
+#
+#   Stage 1 (builder): Node.js compiles TypeScript/React → static HTML/JS/CSS
+#   Stage 2 (final):   nginx serves those static files + proxies API calls
+#
+# WHY TWO STAGES?
+#   The builder stage needs node_modules (~300MB) and Node.js to compile.
+#   The final image only needs the compiled output (~5MB) + nginx (~25MB).
+#   Multi-stage builds keep the final image small (30MB vs 400MB+).
+#
+# RESULT: A container that contains:
+#   /usr/share/nginx/html/index.html       ← React app entry point
+#   /usr/share/nginx/html/assets/*.js      ← Compiled JS bundles
+#   /usr/share/nginx/html/assets/*.css     ← Compiled CSS
+#   /etc/nginx/conf.d/default.conf         ← Our nginx.conf (proxies /api/ → Django)
+#
+# CONNECTION MAP:
+#   frontend/Containerfile → builds image → pushed to the registry configured in k8s/dev.sh
+#                                          ↑ dev.sh handles build + push
+#                                          ↑ 06-frontend.yaml references this image
+# ==============================================================================
+
+# Stage 1: Build the React app
+FROM node:20-alpine AS builder
+WORKDIR /app
+# Copy dependency files first (Docker caching optimization):
+# If only source code changes, npm install layer is cached from last build.
+COPY package.json package-lock.json* ./
+RUN npm install
+# Now copy source code and build
+COPY . .
+RUN npm run build
+# Output: /app/dist/ (Vite's default output directory)
+
+# Stage 2: Serve with nginx
+FROM nginx:alpine
+# Copy ONLY the compiled static files (not node_modules, not source code)
+COPY --from=builder /app/dist /usr/share/nginx/html
+# Copy our custom nginx.conf (handles /api/ proxying and SPA fallback)
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+EXPOSE 80
+# nginx starts automatically via the base image's entrypoint

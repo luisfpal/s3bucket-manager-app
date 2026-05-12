@@ -1,0 +1,59 @@
+# Periodic RGWSquared reconciliation; Forbid prevents overlapping sync runs.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: sync-all-tenants
+  namespace: storage-system
+spec:
+  schedule: "*/10 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: sync
+              image: registry.stencil.com:5000/s3mgr-backend:latest
+              imagePullPolicy: IfNotPresent
+              command:
+                - python
+                - manage.py
+                - sync_all_tenants
+              envFrom:
+                - configMapRef:
+                    name: backend-config
+              env:
+                - name: DJANGO_SECRET_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: backend-secret
+                      key: django-secret-key
+                - name: DATABASE_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: backend-secret
+                      key: database-password
+                - name: S3_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: backend-secret
+                      key: s3-access-key
+                - name: S3_SECRET_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: backend-secret
+                      key: s3-secret-key
+                - name: RGWSQUARED_USERNAME
+                  valueFrom:
+                    secretKeyRef:
+                      name: backend-secret
+                      key: rgwsquared-username
+                - name: RGWSQUARED_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: backend-secret
+                      key: rgwsquared-password
