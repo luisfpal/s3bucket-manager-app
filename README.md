@@ -151,8 +151,6 @@ The script will:
 
 > **Trouble?** Run `./dev.sh check` to diagnose infrastructure prerequisites such as node reachability, Kubernetes API access, registry access, and Ceph RGW health.
 
-> **Want the manual operator flow?** Read `GUIDE.md` for the architecture and troubleshooting guide.
-
 ### Access the App
 
 **Step 1 — Port-forward from the deployment host** (two terminals):
@@ -317,8 +315,7 @@ s3bucket_manager_app/
 │   └── dev.sh                      # Unified deploy + dev loop
 │
 ├── .gitignore
-├── GUIDE.md                        # Architecture and operations guide
-├── LICENSE                         # Intended EUPL-1.2 license text
+├── LICENSE                         # EUPL-1.2-or-later license text
 ├── NOTICE                          # Attribution and project context
 └── README.md                       # This file
 ```
@@ -423,4 +420,4 @@ Backend dependencies are pinned in `backend/requirements.txt` and installed by `
 
 Copyright is held by AREA Science Park. The author is Luis Fernando Palacios Flores.
 
-Intended publication license: European Union Public Licence, version 1.2 or later (`EUPL-1.2-or-later`). Confirm AREA Science Park approval before publishing the repository under this license. See `LICENSE` and `NOTICE`.
+Licensed under the European Union Public Licence, version 1.2 or later (`EUPL-1.2-or-later`). See `LICENSE` and `NOTICE`.

@@ -1,11 +1,5 @@
-# Agent/AI context (local to VM, not project code)
-GEMINI.md
-CLAUDE.md
-.codex
-.gemini/
-.claude/
-
-# Internal docs
+# Private/local documentation
+GUIDE.md
 internal_docs/
 
 # Generated walkthroughs/guides that duplicate README.md content

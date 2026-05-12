@@ -12,6 +12,5 @@ datacenter: a virtualized multi-node environment with Kubernetes, Ceph
 RADOS Gateway object storage, and identity/networking services used to
 approximate production infrastructure during internship development.
 
-Intended publication license: European Union Public Licence, version 1.2 or
-later (EUPL-1.2-or-later). Confirm AREA Science Park approval before
-publishing the repository under this license.
+Licensed under the European Union Public Licence, version 1.2 or later
+(EUPL-1.2-or-later).
