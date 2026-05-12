@@ -80,6 +80,16 @@ The app separates application metadata from object data:
 
 This keeps the UI, permissions, and audit trail in Django while leaving durable file storage to Ceph.
 
+### RGWSquared Dependency
+
+This project depends on **RGWSquared**, an internal microservice developed at [AREA Science Park](https://www.areasciencepark.it/en/research-infrastructures/) for storage policy management in the ORFEO data center. RGWSquared manages user and bucket access policies for Ceph RGW storage services.
+
+RGWSquared is essentially a service wrapper around **Ceph RGW**: RADOS Gateway, the Ceph component that exposes object storage through S3-compatible and Swift-compatible APIs. Ceph stores the objects; RGWSquared handles the higher-level policy layer that maps users, collaborations, proposals, and bucket permissions onto RGW-managed storage.
+
+In this application, RGWSquared is the source of truth for project bucket permissions. It synchronizes with external research-collaboration systems that track proposal/project state, then uses that state to determine which users should have read-only or read-write access to the corresponding Ceph buckets. Django imports that policy state and presents it through the web UI while keeping local bucket metadata, sharing, and audit behavior in its own database.
+
+RGWSquared is currently private because it is tightly coupled to ORFEO-specific infrastructure and collaboration workflows. The integration in this repository should therefore be treated as a deployment dependency and boundary, not as a complete public specification of the microservice. A future deployment could replace RGWSquared by implementing the same essential pipeline: map collaboration/project state to users, buckets, and Ceph RGW access policies.
+
 ## Infrastructure Context
 
 This project was developed and validated in a Stencil virtual datacenter: a virtualized multi-node environment used during the internship to approximate production infrastructure without requiring dedicated physical servers. Stencil runs real datacenter software inside VMs, including a K3s Kubernetes cluster, Ceph RGW for S3-compatible object storage, and supporting identity/networking services.
