@@ -89,11 +89,6 @@ spec:
                 secretKeyRef:
                   name: backend-secret
                   key: rgwsquared-password
-            - name: DJANGO_SUPERUSER_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: backend-secret
-                  key: django-superuser-password
           ports:
             - containerPort: 8000
               name: http

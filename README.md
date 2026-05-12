@@ -280,17 +280,6 @@ Then open `http://localhost:3000`.
 | Tail backend logs            | `./dev.sh logs backend`                                         |
 | Start completely fresh       | `./dev.sh cleanup` then `./dev.sh deploy --env dev --rebuild` |
 
-### Git Workflow
-
-```
-main                    Always deployable. Tagged working states.
-  └── dev/<feature>     Active development. Code may break.
-```
-
-- **Never commit broken code to `main`**. Work on feature branches.
-- **Commit often** on dev branches. Small diffs are easier to debug.
-- When a feature works, merge to `main`.
-
 ## Project Structure
 
 ```
@@ -305,8 +294,7 @@ s3bucket_manager_app/
 │       ├── views/                  # Auth, bucket, and admin API endpoints
 │       ├── services/               # RGWSquared, S3, sync, permissions, crypto
 │       ├── serializers.py          # DRF serializers
-│       ├── pipeline.py             # OAuth2 pipeline (custom claims)
-│       └── management/commands/    # Operational Django commands
+│       └── pipeline.py             # OAuth2 pipeline (custom claims)
 │
 ├── frontend/                       # React SPA
 │   ├── Containerfile               # nginx + built React
@@ -368,7 +356,7 @@ cd k8s
 ./dev.sh access
 ```
 
-The script is the canonical operational entry point. Older helper scripts were removed so deployment, checks, access setup, and cleanup stay in one maintained workflow.
+The script is the canonical operational entry point for deployment, checks, access setup, and cleanup.
 
 ### Switching S3 Endpoint
 
@@ -423,15 +411,13 @@ Use Kubernetes Secrets only. No literal credentials should be documented in this
 
 Set real values in `k8s/env/<env>/secrets.local.yaml` (gitignored) or your external secret manager.
 
-## Reproducibility And Publication
+## Reproducibility
 
 The repository stores source code, Kubernetes templates, dependency manifests, and lockfiles. Frontend generated artifacts are reproducible from `frontend/package-lock.json` with `npm ci` and `npm run build`; `k8s/dev.sh` runs those commands automatically when it needs the generated directories for deployment.
 
-Backend dependencies are pinned in `backend/requirements.txt`; frontend dependencies are locked in `frontend/package-lock.json`. A future migration to `pyproject.toml` + `uv.lock` is compatible with this layout, but the current publication baseline keeps the existing container build path stable.
+Backend dependencies are pinned in `backend/requirements.txt` and installed by `backend/Containerfile`. Frontend dependencies are locked in `frontend/package-lock.json`.
 
-`npm run build` currently reports a large JavaScript chunk because the NeXus/H5Web viewer is bundled into the main SPA. The warning is documented for publication; a later performance pass should lazy-load the file viewer if initial page weight becomes a deployment concern.
-
-`npm audit --omit=dev` passes for production dependencies. A full dev audit still reports the Vite/esbuild development-server advisory; do not expose the Vite dev server outside trusted development networks, and treat the required Vite major upgrade as a separate frontend tooling task.
+`npm run build` currently reports a large JavaScript chunk because the NeXus/H5Web viewer is bundled into the main SPA. A later performance pass should lazy-load the file viewer if initial page weight becomes a deployment concern.
 
 ## License
 

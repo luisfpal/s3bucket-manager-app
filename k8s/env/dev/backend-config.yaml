@@ -24,6 +24,3 @@ data:
   OIDC_CLIENT_ID: "bucket-manager"
 
   RGWSQUARED_URL: "REPLACE_WITH_DEV_RGWSQUARED_URL"
-
-  DJANGO_SUPERUSER_USERNAME: "admin"
-  DJANGO_SUPERUSER_EMAIL: "admin@example.local"
