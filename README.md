@@ -98,6 +98,9 @@ The application is therefore designed around production-like boundaries: contain
 
 ## Quick Start
 
+> [!WARNING]
+> ⚠️ **Environment-specific script:** [k8s/dev.sh](k8s/dev.sh) is calibrated to work well with **my laptop development setup** and the specific cluster/network it was built against. It includes hard-coded assumptions (namespace, node addressing, SSH tunnel/kubeconfig paths, registry, and ports). Even if you satisfy the prerequisites, you must review and adapt these defaults for your environment — it will not work as-is.
+
 ### Prerequisites
 
 On the deployment host:
