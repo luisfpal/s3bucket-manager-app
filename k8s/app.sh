@@ -44,7 +44,6 @@
 #     5. Apply django-postgres; wait for ready
 #     6. Apply backend (init containers wait for postgres + Authentik FQDN); wait for ready
 #     7. Apply frontend; wait for ready
-#     8. Apply CronJob (periodic tenant sync)
 #
 #   deploy-namespace:
 #     Idempotent: kubectl apply 00-namespace.yaml
@@ -326,10 +325,6 @@ apply_app_manifests_for_env() {
     # Step 5: Frontend — serves the React SPA and proxies /api/* to backend-service:8000
     kubectl apply -f "$APP_MANIFESTS_DIR/03-frontend.yaml"
     wait_for_rollout "deployment/frontend" "300s" "2" "$NAMESPACE"
-
-    # Step 6: CronJob — runs every 10 minutes to sync RGWSquared tenant data
-    kubectl apply -f "$APP_MANIFESTS_DIR/04-cronjob.yaml"
-    success "CronJob sync-all-tenants applied"
 
     success "Webapp manifests applied"
 }
@@ -764,7 +759,7 @@ usage() {
     echo ""
     echo "  Deployment:"
     echo "    deploy [--env dev|prod] [--rebuild] [--skip-authentik-check]"
-    echo "                   Full webapp deploy (namespace → secrets → postgres → backend → frontend → cronjob)"
+    echo "                   Full webapp deploy (namespace → secrets → postgres → backend → frontend)"
     echo "    deploy-namespace [--env dev|prod]"
     echo "                   Create bucket-explorer namespace only (production pre-step)"
     echo ""

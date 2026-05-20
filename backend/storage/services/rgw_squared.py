@@ -11,6 +11,10 @@ import requests
 logger = logging.getLogger(__name__)
 
 
+class RGWSquaredError(RuntimeError):
+    """User-facing RGWSquared failure message."""
+
+
 class RGWSquaredClient:
     """Thin wrapper around the RGWSquared REST API."""
 
@@ -42,6 +46,23 @@ class RGWSquaredClient:
         self._token_expires_at = time.time() + (8 * 3600) - self.TOKEN_REFRESH_BUFFER
         logger.info("RGWSquared token refreshed")
 
+    def _extract_error(self, path, resp):
+        """RGWSquared returns every application failure as HTTP 500."""
+        body = (resp.text or "").strip()
+        if body:
+            try:
+                data = resp.json()
+            except requests.exceptions.JSONDecodeError:
+                return body[:500]
+            if isinstance(data, dict):
+                for key in ("message", "error", "err"):
+                    if data.get(key):
+                        return str(data[key])
+                if data.get("res"):
+                    return str(data["res"])
+            return str(data)[:500]
+        return f"RGWSquared {path} failed with HTTP {resp.status_code}"
+
     def _post(self, path, payload=None, timeout=30):
         """Make authenticated POST to RGWSquared. Returns parsed JSON response."""
         self._ensure_auth()
@@ -54,13 +75,14 @@ class RGWSquaredClient:
             },
             timeout=timeout,
         )
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            raise RGWSquaredError(self._extract_error(path, resp))
 
         # RGWSquared may return plain-text error bodies.
         try:
             data = resp.json()
         except requests.exceptions.JSONDecodeError:
-            raise RuntimeError(
+            raise RGWSquaredError(
                 f"RGWSquared {path} returned non-JSON: {resp.text[:200]}"
             )
 
@@ -68,13 +90,33 @@ class RGWSquaredClient:
 
     def list_structures(self):
         """Returns list of structure names, e.g. ["NFFADI"]."""
-        data = self._post("/s3struct/list")
+        data = self._post("/s3struct/structureList")
         return data.get("res", [])
+
+    def get_structure_info(self, structure):
+        """Returns structure readiness and area-mgmt credentials."""
+        data = self._post("/s3struct/structureInfo", {"structure": structure})
+        return data.get("res", {})
+
+    def update_structure(self, structure=None, update_from_ext=True):
+        """Refresh structure JSON and let RGWSquared sync Ceph internally."""
+        payload = {"updateFromExt": bool(update_from_ext)}
+        if structure:
+            payload["structure"] = structure
+        return self._post("/s3struct/structureUpdate", payload, timeout=120)
 
     def list_users(self, structure):
         """Returns list of usernames in a structure."""
         data = self._post("/s3struct/userList", {"structure": structure})
         return data.get("res", [])
+
+    def create_user(self, structure, user):
+        """Create a manual user in the structure."""
+        return self._post(
+            "/s3struct/userCreate",
+            {"structure": structure, "user": user},
+            timeout=60,
+        )
 
     def get_user_info(self, structure, user):
         """Returns {uid, access_key, secret_key, ROBuckets, RWBuckets}.
@@ -85,9 +127,14 @@ class RGWSquaredClient:
         data = self._post("/s3struct/userInfo", {"structure": structure, "user": user})
         return data.get("res", {})
 
-    def list_buckets(self, structure):
+    def list_buckets(self, structure, auto=None, manual=None):
         """Returns list of bucket names (may include non-tenant buckets)."""
-        data = self._post("/s3struct/bucketList", {"structure": structure})
+        payload = {"structure": structure}
+        if auto is not None:
+            payload["auto"] = bool(auto)
+        if manual is not None:
+            payload["manual"] = bool(manual)
+        data = self._post("/s3struct/bucketList", payload)
         return data.get("res", [])
 
     def get_bucket_info(self, structure, bucket_name):
@@ -101,41 +148,60 @@ class RGWSquaredClient:
         )
         return data.get("res", {})
 
+    def check_bucket_name(self, structure, bucket_name):
+        """Ask RGWSquared whether a bucket name is acceptable/available."""
+        data = self._post(
+            "/s3struct/bucketCheckName",
+            {"structure": structure, "bucketName": bucket_name},
+        )
+        return data.get("res")
+
+    def create_bucket(
+        self, structure, bucket_name, rw_permissions=None, ro_permissions=None, tags=None
+    ):
+        """Create a manual bucket and immediately provision it in Ceph."""
+        return self._post(
+            "/s3struct/bucketCreate",
+            {
+                "structure": structure,
+                "bucketName": bucket_name,
+                "bucketAttributes": {
+                    "RWPermissions": rw_permissions or [],
+                    "ROPermissions": ro_permissions or [],
+                    **({"tags": tags} if tags else {}),
+                },
+            },
+            timeout=90,
+        )
+
+    def update_bucket(
+        self, structure, bucket_name, rw_permissions=None, ro_permissions=None, tags=None
+    ):
+        """Replace manual bucket permissions and immediately sync the bucket."""
+        return self._post(
+            "/s3struct/bucketUpdate",
+            {
+                "structure": structure,
+                "bucketName": bucket_name,
+                "bucketAttributes": {
+                    "RWPermissions": rw_permissions or [],
+                    "ROPermissions": ro_permissions or [],
+                    **({"tags": tags} if tags else {}),
+                },
+            },
+            timeout=90,
+        )
+
+    def delete_bucket(self, structure, bucket_name):
+        """Delete a manual bucket through RGWSquared."""
+        return self._post(
+            "/s3struct/bucketDelete",
+            {"structure": structure, "bucketName": bucket_name},
+            timeout=120,
+        )
+
     def upload_csv(self, content_base64):
         """Upload instruments CSV (base64-encoded) for NFFADI."""
         return self._post(
-            "/s3structnffadi/extCSVUpload", {"content": content_base64}, timeout=60
+            "/s3structnffadi/csvUpload", {"content": content_base64}, timeout=60
         )
-
-    def sync_proposals(self):
-        """Fetch researchers from NFFA-DI proposals API."""
-        return self._post("/s3structnffadi/extEPSync", timeout=60)
-
-    def sync_structure(self, tenant_code):
-        """Generate structure definition in CouchDB.
-
-        Routes to tenant-specific endpoint: /s3struct{code}/sync
-        """
-        path = f"/s3struct{tenant_code.lower()}/sync"
-        return self._post(path, timeout=60)
-
-    def apply_to_ceph(self, structure):
-        """Apply structure to Ceph RGW. May return 504 but completes server-side.
-
-        Returns the response data on success, or raises on non-504 errors.
-        On 504: returns None (caller should poll for completion).
-        """
-        try:
-            return self._post("/s3struct/sync", {"structure": structure}, timeout=45)
-        except requests.exceptions.HTTPError as e:
-            if e.response is not None and e.response.status_code == 504:
-                logger.warning(
-                    f"apply_to_ceph({structure}) got 504 — sync continues server-side"
-                )
-                return None
-            raise
-        except requests.exceptions.ReadTimeout:
-            logger.warning(
-                f"apply_to_ceph({structure}) timed out — sync continues server-side"
-            )
-            return None

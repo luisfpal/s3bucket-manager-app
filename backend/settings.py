@@ -228,8 +228,6 @@ SESSION_COOKIE_SAMESITE = "Lax"
 # S3-compatible storage (Ceph RGW)
 
 S3_ENDPOINT = os.getenv("S3_ENDPOINT", "https://192.168.132.110")
-S3_ACCESS_KEY = require_non_debug_env("S3_ACCESS_KEY", os.getenv("S3_ACCESS_KEY", ""))
-S3_SECRET_KEY = require_non_debug_env("S3_SECRET_KEY", os.getenv("S3_SECRET_KEY", ""))
 S3_VERIFY_SSL = os.getenv("S3_VERIFY_SSL", "True") == "True"
 S3_REGION = os.getenv("S3_REGION", "us-east-1")
 

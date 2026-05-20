@@ -119,7 +119,6 @@ def select_tenant(request):
             "membership": {
                 "ceph_username": membership.ceph_username,
                 "uo_code": membership.uo_code,
-                "credentials_cached": bool(membership.s3_access_key),
             },
         }
     )

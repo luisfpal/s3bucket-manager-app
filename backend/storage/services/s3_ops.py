@@ -1,22 +1,16 @@
-"""S3 operations with per-tenant credentials.
+"""S3 object operations with transient RGWSquared credentials.
 
-Management client (area-mgmt keys): for bucket creation/deletion and file ops.
-Area-mgmt keys are fetched dynamically from the RGW Admin REST API
-using RGW admin user credentials (S3_ACCESS_KEY/S3_SECRET_KEY with
-users=* cap). Cached in Tenant model.
+RGWSquared owns bucket lifecycle and returns the tenant area-mgmt keys through
+structureInfo. Django uses those keys only in memory for object operations.
 """
 
 import logging
-import hmac
-import hashlib
-import base64
-from email.utils import formatdate
 
 import boto3
 import urllib3
-import requests
 from django.conf import settings
-from django.utils import timezone
+
+from storage.services.rgw_squared import RGWSquaredClient
 
 logger = logging.getLogger(__name__)
 
@@ -36,89 +30,49 @@ def _make_s3_client(access_key, secret_key):
     )
 
 
-def _rgw_admin_api_get(path, params=""):
-    """GET request to Ceph RGW Admin REST API using RGW admin credentials (SigV2)."""
-    access_key = settings.S3_ACCESS_KEY
-    secret_key = settings.S3_SECRET_KEY
-    date = formatdate(timeval=None, localtime=False, usegmt=True)
-
-    # Ceph RGW Admin REST API accepts SigV2 for this deployment.
-    string_to_sign = f"GET\n\n\n{date}\n{path}"
-    signature = base64.b64encode(
-        hmac.new(secret_key.encode(), string_to_sign.encode(), hashlib.sha1).digest()
-    ).decode()
-
-    url = f"{settings.S3_ENDPOINT}{path}"
-    if params:
-        url += f"?{params}"
-
-    resp = requests.get(
-        url,
-        headers={
-            "Date": date,
-            "Authorization": f"AWS {access_key}:{signature}",
-        },
-        verify=settings.S3_VERIFY_SSL,
-        timeout=15,
-    )
-    resp.raise_for_status()
-    return resp.json()
-
-
-def fetch_mgmt_keys(tenant):
-    """Fetch {TENANT}$area-mgmt S3 keys from RGW Admin API. Caches in Tenant model."""
-    if tenant.mgmt_keys_fresh():
-        return tenant.get_mgmt_keys()
-
-    uid = tenant.mgmt_uid  # e.g., "NFFADI$area-mgmt"
-    logger.info(f"Fetching S3 keys for {uid} from RGW Admin API")
-
-    data = _rgw_admin_api_get("/admin/user", f"uid={uid}")
-    keys = data.get("keys", [])
-    if not keys:
-        raise RuntimeError(f"No S3 keys found for {uid}")
-
-    key = keys[0]
-    tenant.mgmt_access_key = key["access_key"]
-    tenant.mgmt_secret_key = key["secret_key"]
-    tenant.mgmt_keys_updated_at = timezone.now()
-    tenant.save(
-        update_fields=["mgmt_access_key", "mgmt_secret_key", "mgmt_keys_updated_at"]
+def _get_client():
+    return RGWSquaredClient(
+        base_url=settings.RGWSQUARED_URL,
+        username=settings.RGWSQUARED_USERNAME,
+        password=settings.RGWSQUARED_PASSWORD,
     )
 
-    return tenant.get_mgmt_keys()
+
+def _structure_name(tenant):
+    return tenant.rgwsquared_structure or tenant.code
+
+
+def get_structure_info(tenant, client=None):
+    """Return RGWSquared structureInfo for a tenant."""
+    client = client or _get_client()
+    return client.get_structure_info(_structure_name(tenant))
+
+
+def ensure_structure_initialized(tenant, client=None):
+    """Return structureInfo or raise if RGWSquared has no Ceph backing yet."""
+    info = get_structure_info(tenant, client=client)
+    if not info.get("initialized"):
+        raise RuntimeError(f"RGWSquared structure {tenant.code} is not initialized")
+    return info
+
+
+def fetch_mgmt_keys(tenant, client=None):
+    """Fetch transient {TENANT}$area-mgmt S3 keys from RGWSquared."""
+    info = ensure_structure_initialized(tenant, client=client)
+    rgw_user = info.get("rgwintUser") or {}
+    access_key = rgw_user.get("access_key")
+    secret_key = rgw_user.get("secret_key")
+    if not access_key or not secret_key:
+        raise RuntimeError(
+            f"RGWSquared structureInfo returned no S3 keys for {tenant.code}"
+        )
+    return access_key, secret_key
 
 
 def get_mgmt_s3_client(tenant):
-    """S3 client using tenant's area-mgmt credentials. For bucket lifecycle ops."""
+    """S3 client using transient tenant area-mgmt credentials."""
     access_key, secret_key = fetch_mgmt_keys(tenant)
     return _make_s3_client(access_key, secret_key)
-
-
-def create_bucket(tenant, bare_name):
-    """Create a bucket using tenant's area-mgmt credentials.
-    bare_name = the name without tenant prefix (e.g., "nffa-di_cnr-iom.ts_myproject").
-    """
-    s3 = get_mgmt_s3_client(tenant)
-    s3.create_bucket(Bucket=bare_name)
-    logger.info(f"Created bucket {bare_name} in tenant {tenant.code}")
-
-
-def delete_bucket(tenant, bare_name):
-    """Delete a bucket and all its objects. Uses area-mgmt credentials."""
-    s3 = get_mgmt_s3_client(tenant)
-
-    # RGW refuses bucket deletion until all objects are removed.
-    try:
-        response = s3.list_objects_v2(Bucket=bare_name)
-        if "Contents" in response:
-            objects = [{"Key": obj["Key"]} for obj in response["Contents"]]
-            s3.delete_objects(Bucket=bare_name, Delete={"Objects": objects})
-    except Exception as e:
-        logger.warning(f"Could not empty bucket {bare_name} before deletion: {e}")
-
-    s3.delete_bucket(Bucket=bare_name)
-    logger.info(f"Deleted bucket {bare_name} from tenant {tenant.code}")
 
 
 def list_objects(s3_client, bare_name):
@@ -166,24 +120,26 @@ def download_object(s3_client, bare_name, key):
 
 
 def get_all_bucket_stats():
-    """Fetch storage stats for all buckets from RGW Admin API.
+    """Compatibility shim. RGW Admin API credentials are no longer configured."""
+    return {}
 
-    Returns dict: {bucket_name: {'size_bytes': int, 'num_objects': int}}
-    One admin API call keeps dashboards from issuing per-bucket requests.
-    """
+
+def get_bucket_stats_for_tenant(tenant, bucket_names):
+    """Calculate simple bucket stats using S3 object listing."""
+    if not bucket_names:
+        return {}
     try:
-        data = _rgw_admin_api_get("/admin/bucket", "stats=true")
+        s3 = get_mgmt_s3_client(tenant)
     except Exception as e:
-        logger.warning(f"Could not fetch bucket stats from RGW: {e}")
+        logger.warning(f"Could not create S3 client for stats in {tenant.code}: {e}")
         return {}
 
     stats = {}
-    for bucket in data if isinstance(data, list) else [data]:
-        name = bucket.get("bucket", "")
-        usage = bucket.get("usage", {}).get("rgw.main", {})
+    for name in bucket_names:
+        files = list_objects(s3, name)
         stats[name] = {
-            "size_bytes": usage.get("size_actual", 0),
-            "num_objects": usage.get("num_objects", 0),
+            "size_bytes": sum(f["size"] for f in files),
+            "num_objects": len(files),
         }
     return stats
 

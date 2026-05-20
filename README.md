@@ -8,7 +8,7 @@ A web application for managing S3 buckets on **Ceph RADOS Gateway (RGW)**, deplo
 flowchart LR
     Browser[Browser]
 
-    subgraph K3s[K3s namespace: bucket-manager]
+    subgraph K3s[K3s namespaces: bucket-explorer + authentik-bucket-explorer]
       FE[nginx + React SPA]
       BE[Django REST API]
       PG[(django-postgres)]
@@ -75,8 +75,8 @@ The app separates application metadata from object data:
 
 - **Tenants** represent research areas or structures. Each active request carries one tenant context through the `X-Tenant-ID` header.
 - **Project buckets** come from RGWSquared and mirror upstream proposal permissions. Users can access them according to RGWSquared RO/RW grants.
-- **Local research buckets** are created inside the app for tenant members with write access. Django records ownership and sharing metadata, while Ceph RGW stores the objects.
-- **Cached S3 credentials** are stored encrypted in PostgreSQL and decrypted only when the backend needs to call Ceph RGW.
+- **Local research buckets** are requested through RGWSquared for tenant members with write access. Django records ownership and sharing metadata, while Ceph RGW stores the objects.
+- **S3 credentials** are not stored by the webapp. Django asks RGWSquared for transient area-management keys when it needs to operate on files inside a bucket.
 
 This keeps the UI, permissions, and audit trail in Django while leaving durable file storage to Ceph.
 
@@ -99,7 +99,7 @@ The application is therefore designed around production-like boundaries: contain
 ## Quick Start
 
 > [!WARNING]
-> ⚠️ **Environment-specific script:** [k8s/dev.sh](k8s/dev.sh) is calibrated to work well with **my laptop development setup** and the specific cluster/network it was built against. It includes hard-coded assumptions (namespace, node addressing, SSH tunnel/kubeconfig paths, registry, and ports). Even if you satisfy the prerequisites, you must review and adapt these defaults for your environment — it will not work as-is.
+> ⚠️ **Environment-specific scripts:** [k8s/infra.sh](k8s/infra.sh) and [k8s/app.sh](k8s/app.sh) are calibrated for the development K3s cluster and registry defaults. Review namespace, node addressing, kubeconfig, registry, and port-forward assumptions before reusing them elsewhere.
 
 ### Prerequisites
 
@@ -126,7 +126,7 @@ This creates `frontend/node_modules/` and `frontend/dist/`. The deployment scrip
 
 ```bash
 cd k8s
-./dev.sh deploy --env dev --rebuild
+./app.sh deploy --env dev --rebuild
 ```
 
 There is no root-level JavaScript workspace for this project; all Node dependencies live under `frontend/`.
@@ -139,20 +139,21 @@ export KUBECONFIG=/tmp/k3s-tunnel-kubeconfig.yaml
 
 # 2. Run the deployment from the repository checkout
 cd k8s
-./dev.sh deploy --env dev --rebuild
+./infra.sh deploy --env dev
+./app.sh deploy --env dev --rebuild
 ```
 
-The script will:
+The scripts will:
 
 1. Build backend and frontend container images with `podman`
 2. Push images to the configured registry
-3. Apply environment overlays and Kubernetes manifests in dependency order
-4. Restart workloads so K3s pulls updated images
+3. Deploy Authentik infrastructure through `infra.sh`
+4. Apply app environment overlays and manifests through `app.sh`
 5. Wait for pods and rollouts to become healthy
-6. Auto-configure the Authentik OAuth2 provider
+6. Auto-configure the Authentik OAuth2 provider in development
 7. Print access instructions for the selected environment
 
-> **Trouble?** Run `./dev.sh check` to diagnose infrastructure prerequisites such as node reachability, Kubernetes API access, registry access, and Ceph RGW health.
+> **Trouble?** Run `./infra.sh check` to diagnose infrastructure prerequisites such as node reachability, Kubernetes API access, registry access, and Ceph RGW health.
 
 ### Access the App
 
@@ -162,10 +163,10 @@ The script will:
 export KUBECONFIG=/tmp/k3s-tunnel-kubeconfig.yaml
 
 # Terminal 1: React frontend
-kubectl port-forward -n bucket-manager svc/frontend-service 3000:80
+kubectl port-forward -n bucket-explorer svc/frontend-service 3000:80
 
 # Terminal 2: Authentik (for OAuth2 login)
-kubectl port-forward -n bucket-manager svc/authentik-service 9000:9000
+kubectl port-forward -n authentik-bucket-explorer svc/authentik-service 9000:9000
 ```
 
 **Step 2 — If the deployment host is remote, create SSH local forwards from your workstation:**
@@ -181,14 +182,15 @@ ssh -L 3000:localhost:3000 -L 9000:localhost:9000 <deployment-host>
 | `http://localhost:3000` | The app         |
 | `http://localhost:9000` | Authentik admin |
 
-**Authentik admin password:** stored in Kubernetes secret `authentik-secret.bootstrap-password` (set in `k8s/env/<env>/secrets.local.yaml`).
+**Authentik admin password:** stored in Kubernetes secret `authentik-secret.bootstrap-password` (set in `k8s/env/<env>/infra-secrets.local.yaml`).
 
 ### Cleanup
 
 ```bash
 export KUBECONFIG=/tmp/k3s-tunnel-kubeconfig.yaml
 cd k8s
-./dev.sh cleanup
+./app.sh cleanup
+./infra.sh cleanup
 ```
 
 ---
@@ -199,10 +201,11 @@ cd k8s
 
 | Script                    | Purpose                       | When to use                          |
 | ------------------------- | ----------------------------- | ------------------------------------ |
-| `dev.sh deploy --env dev --rebuild` | Full deployment with env overlays    |
-| `dev.sh`                | Fast inner loop (~60s)        | Every code change during development |
-| `dev.sh check`          | Infrastructure health check   | After reboots, when things break     |
-| `dev.sh cleanup`        | Tear down namespace/resources | Start fresh                          |
+| `infra.sh deploy --env dev` | Deploy Authentik infrastructure |
+| `app.sh deploy --env dev --rebuild` | Build/push/deploy the webapp |
+| `app.sh backend` / `app.sh frontend` | Fast component rebuild loop |
+| `infra.sh check` | Infrastructure health check |
+| `app.sh cleanup` / `infra.sh cleanup` | Tear down app/infra namespaces |
 
 ### The Development Loop
 
@@ -212,32 +215,32 @@ cd k8s
 cd k8s
 
 # Changed backend code (Python)?
-./dev.sh backend
+./app.sh backend
 
 # Changed frontend code (React)?
-./dev.sh frontend
+./app.sh frontend
 
 # Changed both?
-./dev.sh all
+./app.sh all
 
 # Changed a K8s manifest (YAML)? Apply it directly:
 export KUBECONFIG=/tmp/k3s-tunnel-kubeconfig.yaml
-kubectl apply -f manifests/05-backend.yaml -n bucket-manager
-./dev.sh restart backend
+kubectl apply -f manifests/app/02-backend.yaml
+./app.sh restart backend
 ```
 
-**What `./dev.sh backend` does under the hood** (manual steps for reference):
+**What `./app.sh backend` does under the hood** (manual steps for reference):
 
 ```bash
 # 1. Build container image
-podman build -t <registry>/bucket-manager-backend:latest -f backend/Containerfile backend/
+podman build -t ghcr.io/luisfpal/bucket-explorer-backend:latest -f backend/Containerfile backend/
 
 # 2. Push to the configured registry
-podman push <registry>/bucket-manager-backend:latest
+podman push ghcr.io/luisfpal/bucket-explorer-backend:latest
 
 # 3. Restart the deployment (picks up new image)
-kubectl rollout restart deployment/backend -n bucket-manager
-kubectl rollout status deployment/backend -n bucket-manager --timeout=120s
+kubectl rollout restart deployment/backend -n bucket-explorer
+kubectl rollout status deployment/backend -n bucket-explorer --timeout=120s
 ```
 
 ### Start of Day / After Reboot
@@ -246,13 +249,13 @@ kubectl rollout status deployment/backend -n bucket-manager --timeout=120s
 cd k8s
 
 # Quick health check — is everything alive?
-./dev.sh status
+./app.sh status
 
 # If SSH tunnel or port-forwards are down:
-./dev.sh access
+./app.sh access
 
 # If deeper issues (Ceph, VMs, disk space):
-./dev.sh check
+./infra.sh check
 ```
 
 **From your LOCAL machine** (laptop):
@@ -268,18 +271,18 @@ Then open `http://localhost:3000`.
 
 | Scenario                     | Command                                                           |
 | ---------------------------- | ----------------------------------------------------------------- |
-| Changed Python code          | `./dev.sh backend`                                              |
-| Changed React code           | `./dev.sh frontend`                                             |
-| Changed both                 | `./dev.sh all`                                                  |
-| Changed K8s manifest         | `kubectl apply -f <file>` then `./dev.sh restart <component>` |
-| Config change only (no code) | `./dev.sh restart backend`                                      |
-| Check if everything is alive | `./dev.sh status`                                               |
-| Port-forwards died           | `./dev.sh access`                                               |
+| Changed Python code          | `./app.sh backend`                                              |
+| Changed React code           | `./app.sh frontend`                                             |
+| Changed both                 | `./app.sh all`                                                  |
+| Changed K8s manifest         | `kubectl apply -f <file>` then `./app.sh restart <component>` |
+| Config change only (no code) | `./app.sh restart backend`                                      |
+| Check if everything is alive | `./app.sh status`                                               |
+| Port-forwards died           | `./app.sh access`                                               |
 | Rebooted workstation         | Recreate your SSH local forwards to the deployment host           |
-| Rebooted VM                  | `./dev.sh access` then test                                     |
-| Ceph seems broken            | `./dev.sh check`                                                |
-| Tail backend logs            | `./dev.sh logs backend`                                         |
-| Start completely fresh       | `./dev.sh cleanup` then `./dev.sh deploy --env dev --rebuild` |
+| Rebooted VM                  | `./app.sh access` then test                                     |
+| Ceph seems broken            | `./infra.sh check`                                                |
+| Tail backend logs            | `./app.sh logs backend`                                         |
+| Start completely fresh       | `./app.sh cleanup`, `./infra.sh cleanup`, then redeploy |
 
 ## Project Structure
 
@@ -305,17 +308,12 @@ s3bucket_manager_app/
 │
 ├── k8s/                            # Kubernetes deployment + tooling
 │   ├── manifests/
-│   │   ├── 00-namespace.yaml
-│   │   ├── 01-authentik-postgres.yaml
-│   │   ├── 02-authentik-redis.yaml
-│   │   ├── 03-authentik-server.yaml
-│   │   ├── 04-django-postgres.yaml
-│   │   ├── 05-backend.yaml
-│   │   ├── 06-frontend.yaml
-│   │   └── 07-cronjob.yaml
+│   │   ├── infra/                  # Authentik namespace resources
+│   │   └── app/                    # Webapp namespace resources
 │   ├── env/                        # dev/prod config + secret templates
 │   ├── configure_authentik.py      # Auto-configure OAuth2 provider
-│   └── dev.sh                      # Unified deploy + dev loop
+│   ├── infra.sh                    # Authentik infra operator script
+│   └── app.sh                      # Webapp deploy + dev loop
 │
 ├── .gitignore
 ├── LICENSE                         # EUPL-1.2-or-later license text
@@ -347,41 +345,40 @@ Development Ceph RGW deployments may use self-signed TLS certificates. Productio
 
 The public repository documents the portable deployment shape. Environment-specific hostnames, IP addresses, tunnel sockets, dashboard passwords, and break-glass Ceph procedures belong in the operator runbook for the target infrastructure.
 
-For a normal development or staging deployment, start with the unified script:
+For a normal development or staging deployment, start with the app/infra scripts:
 
 ```bash
 cd k8s
-./dev.sh check
-./dev.sh deploy --env dev --rebuild
-./dev.sh access
+./infra.sh check
+./infra.sh deploy --env dev
+./app.sh deploy --env dev --rebuild
+./app.sh access
 ```
 
-The script is the canonical operational entry point for deployment, checks, access setup, and cleanup.
+`infra.sh` owns Authentik infrastructure. `app.sh` owns the webapp namespace and image rebuild loop.
 
 ### Switching S3 Endpoint
 
-The S3 endpoint is runtime configuration. Update the ConfigMap/Secret values and restart the backend; no image rebuild is required.
+The S3 endpoint is runtime configuration. Update the ConfigMap value and restart the backend; no image rebuild is required. S3 access keys come from RGWSquared `structureInfo`, not Kubernetes secrets.
 
 ```bash
 export KUBECONFIG=/path/to/kubeconfig
 
-kubectl patch configmap backend-config -n bucket-manager --type merge \
+kubectl patch configmap backend-config -n bucket-explorer --type merge \
   -p '{"data":{"S3_ENDPOINT":"https://<s3-rgw-endpoint>","S3_VERIFY_SSL":"True"}}' && \
-kubectl patch secret backend-secret -n bucket-manager \
-  -p '{"stringData":{"s3-access-key":"<access-key>","s3-secret-key":"<secret-key>"}}' && \
-kubectl rollout restart deployment/backend -n bucket-manager
+kubectl rollout restart deployment/backend -n bucket-explorer
 ```
 
-> **Note:** `k8s/manifests/05-backend.yaml` references environment overlay resources. A full `./dev.sh deploy --env <env>` reapplies overlay defaults.
+> **Note:** `k8s/manifests/app/02-backend.yaml` references environment overlay resources. A full `./app.sh deploy --env <env>` reapplies overlay defaults.
 
 ### General Troubleshooting
 
 | Symptom                                 | Likely cause                                                         | First check                                                                        |
 | --------------------------------------- | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| `kubectl` hangs or connection refused | Kubeconfig, tunnel, or API reachability issue                        | `./dev.sh check`                                                                 |
-| Backend CrashLoopBackOff                | PostgreSQL, Authentik, or required secret missing                    | `kubectl logs <pod> -n bucket-manager --all-containers`                          |
-| Login redirects fail                    | Authentik provider/client not configured for the active callback URL | Re-run `./dev.sh deploy --env <env>` and inspect `configure_authentik.py` logs |
-| S3 `AccessDenied`                     | Wrong tenant credentials or stale RGWSquared sync data               | Check `backend-secret` and run the admin sync flow                               |
+| `kubectl` hangs or connection refused | Kubeconfig, tunnel, or API reachability issue                        | `./infra.sh check`                                                                 |
+| Backend CrashLoopBackOff                | PostgreSQL, Authentik, or required secret missing                    | `kubectl logs <pod> -n bucket-explorer --all-containers`                          |
+| Login redirects fail                    | Authentik provider/client not configured for the active callback URL | Re-run `./infra.sh configure --env <env>` and inspect `configure_authentik.py` logs |
+| S3 `AccessDenied`                     | RGWSquared returned stale/invalid transient keys or bucket policy is stale | Run the admin sync flow and check RGWSquared `structureInfo`                |
 | S3 connection errors                    | Ceph RGW endpoint, TLS, or network failure                           | Check `S3_ENDPOINT`, `S3_VERIFY_SSL`, and Ceph RGW health                      |
 | Frontend cannot call the API            | nginx cannot resolve or reach `backend-service`                    | Inspect frontend pod logs and `frontend/nginx.conf`                              |
 
@@ -405,15 +402,14 @@ Use Kubernetes Secrets only. No literal credentials should be documented in this
 | ------------------------- | ------------------------------------------------------------------------------- |
 | Authentik admin bootstrap | `authentik-secret.bootstrap-password`                                         |
 | OIDC client secret        | `backend-secret.oidc-client-secret`                                           |
-| S3 access/secret keys     | `backend-secret.s3-access-key` / `backend-secret.s3-secret-key`             |
 | RGWSquared credentials    | `backend-secret.rgwsquared-username` / `backend-secret.rgwsquared-password` |
 | Django DB password        | `backend-secret.database-password`                                            |
 
-Set real values in `k8s/env/<env>/secrets.local.yaml` (gitignored) or your external secret manager.
+Set real values in `k8s/env/<env>/*.local.yaml` (gitignored) or your external secret manager.
 
 ## Reproducibility
 
-The repository stores source code, Kubernetes templates, dependency manifests, and lockfiles. Frontend generated artifacts are reproducible from `frontend/package-lock.json` with `npm ci` and `npm run build`; `k8s/dev.sh` runs those commands automatically when it needs the generated directories for deployment.
+The repository stores source code, Kubernetes templates, dependency manifests, and lockfiles. Frontend generated artifacts are reproducible from `frontend/package-lock.json` with `npm ci` and `npm run build`; `k8s/app.sh` runs those commands automatically when it needs the generated directories for deployment.
 
 Backend dependencies are pinned in `backend/requirements.txt` and installed by `backend/Containerfile`. Frontend dependencies are locked in `frontend/package-lock.json`.
 

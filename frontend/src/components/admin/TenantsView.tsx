@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { adminAPI, getApiError } from '../../services/api'
-import { formatDateTime, formatSize } from '../../utils/format'
+import { formatSize } from '../../utils/format'
 import type { AdminTenant } from '../../types'
 
 function TenantsView() {
@@ -36,7 +36,7 @@ function TenantsView() {
               <th>Members</th>
               <th>Buckets</th>
               <th>Storage</th>
-              <th>Keys Updated</th>
+              <th>RGWSquared</th>
             </tr>
           </thead>
           <tbody>
@@ -46,7 +46,12 @@ function TenantsView() {
                 <td>{t.member_count}</td>
                 <td>{t.bucket_count}</td>
                 <td>{formatSize(t.storage_bytes)}</td>
-                <td>{t.mgmt_keys_updated_at ? formatDateTime(t.mgmt_keys_updated_at) : 'Never'}</td>
+                <td>
+                  {t.initialized ? 'Initialized' : 'Not initialized'}
+                  <span style={{ color: '#6b7280', marginLeft: '0.5rem' }}>
+                    {t.buckets_auto} auto / {t.buckets_manual} manual
+                  </span>
+                </td>
               </tr>
             ))}
             {tenants.length === 0 && (

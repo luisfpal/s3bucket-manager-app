@@ -13,10 +13,8 @@ interface PipelineStep {
 
 const INITIAL_STEPS: PipelineStep[] = [
   { label: '1. Upload CSV to RGWSquared', status: 'pending' },
-  { label: '2. Fetch proposals from external API', status: 'pending' },
-  { label: '3. Generate structure definition', status: 'pending' },
-  { label: '4. Apply structure to Ceph RGW', status: 'pending' },
-  { label: '5. Refresh local Django cache', status: 'pending' },
+  { label: '2. Update RGWSquared structure', status: 'pending' },
+  { label: '3. Refresh local Django cache', status: 'pending' },
 ]
 
 function statusIcon(s: StepStatus) {
@@ -39,7 +37,6 @@ function SyncView() {
   const [syncing, setSyncing] = useState(false)
   const [steps, setSteps] = useState<PipelineStep[]>(INITIAL_STEPS)
   const [pipelineRunning, setPipelineRunning] = useState(false)
-  const [skipProposals, setSkipProposals] = useState(true)
   const fileRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -76,12 +73,8 @@ function SyncView() {
   }
 
   const runPipeline = async () => {
-    const file = fileRef.current?.files?.[0]
-    if (!file) {
-      setError('Select a CSV file first')
-      return
-    }
-    if (file.size > 10 * 1024 * 1024) {
+    const file = fileRef.current?.files?.[0] || null
+    if (file && file.size > 10 * 1024 * 1024) {
       setError('File too large (max 10 MB)')
       return
     }
@@ -91,43 +84,25 @@ function SyncView() {
     setError(null)
     setResult(null)
     setSteps(INITIAL_STEPS.map((s, i) =>
-      (i === 1 && skipProposals) ? { ...s, status: 'skipped' as StepStatus } : s
+      (!file && i === 0) ? { ...s, status: 'skipped' as StepStatus } : s
     ))
 
     try {
-      // Keep sync explicit so operators can recover at the RGWSquared/Ceph boundary that failed.
-      updateStep(0, { status: 'running' })
-      const csvResult = await adminAPI.syncUploadCSV(file)
-      updateStep(0, { status: 'done', result: summarize(csvResult) })
-
-      if (skipProposals) {
-        updateStep(1, { status: 'skipped', result: 'Skipped — using existing proposals data in CouchDB' })
+      if (file) {
+        updateStep(0, { status: 'running' })
+        const csvResult = await adminAPI.syncUploadCSV(file)
+        updateStep(0, { status: 'done', result: summarize(csvResult) })
       } else {
-        updateStep(1, { status: 'running' })
-        try {
-          const propResult = await adminAPI.syncProposals()
-          updateStep(1, { status: 'done', result: summarize(propResult) })
-        } catch (err: unknown) {
-          const msg = getApiError(err, 'Proposals fetch failed')
-          updateStep(1, { status: 'failed', error: msg })
-          // Existing CouchDB proposals are enough for the next RGWSquared step.
-        }
+        updateStep(0, { status: 'skipped', result: 'No CSV selected' })
       }
 
+      updateStep(1, { status: 'running' })
+      const updateResult = await adminAPI.syncUpdateStructure(structure, true)
+      updateStep(1, { status: 'done', result: summarize(updateResult) })
+
       updateStep(2, { status: 'running' })
-      const genResult = await adminAPI.syncGenerate(structure)
-      updateStep(2, { status: 'done', result: summarize(genResult) })
-
-      updateStep(3, { status: 'running' })
-      const applyResult = await adminAPI.syncApply(structure)
-      const applyMsg = applyResult.status === 'in_progress'
-        ? 'Ceph sync continues server-side (timeout expected)'
-        : summarize(applyResult)
-      updateStep(3, { status: 'done', result: applyMsg })
-
-      updateStep(4, { status: 'running' })
       const refreshResult = await adminAPI.syncRefresh(structure)
-      updateStep(4, { status: 'done', result: summarize(refreshResult) })
+      updateStep(2, { status: 'done', result: summarize(refreshResult) })
 
       setResult('Pipeline completed successfully')
       if (fileRef.current) fileRef.current.value = ''
@@ -184,21 +159,12 @@ function SyncView() {
       <div className="admin-sync-section">
         <h2>Full Sync Pipeline</h2>
         <p>
-          Upload instruments CSV and run the complete sync chain:
-          CSV upload, proposals fetch, structure generation, Ceph provisioning, local cache refresh.
+          Optionally upload an instruments CSV, ask RGWSquared to update the structure,
+          then refresh Django's local cache.
         </p>
 
         <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', marginTop: '1rem', flexWrap: 'wrap' }}>
           <input type="file" accept=".csv" ref={fileRef} disabled={pipelineRunning} />
-          <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.875rem', cursor: 'pointer' }}>
-            <input
-              type="checkbox"
-              checked={skipProposals}
-              onChange={(e) => setSkipProposals(e.target.checked)}
-              disabled={pipelineRunning}
-            />
-            Skip proposals fetch (use existing CouchDB data)
-          </label>
         </div>
 
         <div style={{ marginTop: '0.75rem' }}>
@@ -284,11 +250,6 @@ function summarize(data: unknown): string {
     if (res && typeof res === 'object') {
       const r = res as Record<string, unknown>
       if (r.numProposals) return `${r.numProposals} proposals (${obj.execTime})`
-      if (r.struct) {
-        const buckets = (r.struct as Record<string, unknown>).buckets
-        const count = Array.isArray(buckets) ? buckets.length : '?'
-        return `Structure generated: ${count} buckets (${obj.execTime})`
-      }
       // CSV upload returns the instrument rows under res.data.
       if (Array.isArray(r.data)) return `${r.data.length} instruments uploaded (${obj.execTime})`
       if (r.count) return `${r.count} items (${obj.execTime})`

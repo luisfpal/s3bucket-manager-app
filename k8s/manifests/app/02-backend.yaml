@@ -60,16 +60,6 @@ spec:
                 secretKeyRef:
                   name: backend-secret
                   key: oidc-client-secret
-            - name: S3_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: backend-secret
-                  key: s3-access-key
-            - name: S3_SECRET_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: backend-secret
-                  key: s3-secret-key
             - name: RGWSQUARED_USERNAME
               valueFrom:
                 secretKeyRef:

@@ -2,9 +2,6 @@
 
 from django.contrib.auth.models import AbstractUser
 from django.db import models
-from django.utils import timezone
-
-from storage.services.crypto import encrypt_if_needed, decrypt_if_needed
 
 
 class User(AbstractUser):
@@ -145,10 +142,8 @@ class User(AbstractUser):
 class Tenant(models.Model):
     """A research project or laboratory that gets its own S3 namespace.
 
-    Each tenant maps to:
-    - A "structure" in RGWSquared (e.g., "NFFADI")
-    - Two Ceph RGW users: {code}$area-mgmt (bucket owner) and {code}$ext-users (subusers)
-    - A bucket naming prefix for local research buckets
+    Each tenant maps to a structure in RGWSquared and a local naming prefix.
+    RGWSquared owns Ceph users, bucket lifecycle, and S3 credential issuance.
     """
 
     code = models.CharField(max_length=30, unique=True)
@@ -165,11 +160,6 @@ class Tenant(models.Model):
     )
     is_active = models.BooleanField(default=True)
 
-    # Cached area-mgmt keys are encrypted on save; callers must use get_mgmt_keys().
-    mgmt_access_key = models.CharField(max_length=1024, blank=True)
-    mgmt_secret_key = models.CharField(max_length=1024, blank=True)
-    mgmt_keys_updated_at = models.DateTimeField(null=True, blank=True)
-
     class Meta:
         db_table = "tenants"
         ordering = ["code"]
@@ -177,32 +167,9 @@ class Tenant(models.Model):
     def __str__(self):
         return f"{self.code} ({self.name})"
 
-    def save(self, *args, **kwargs):
-        self.mgmt_access_key = encrypt_if_needed(self.mgmt_access_key)
-        self.mgmt_secret_key = encrypt_if_needed(self.mgmt_secret_key)
-        super().save(*args, **kwargs)
-
-    @property
-    def mgmt_uid(self):
-        """RGW user ID for this tenant's management account."""
-        return f"{self.code}$area-mgmt"
-
-    def get_mgmt_keys(self):
-        return (
-            decrypt_if_needed(self.mgmt_access_key),
-            decrypt_if_needed(self.mgmt_secret_key),
-        )
-
-    def mgmt_keys_fresh(self, max_age_seconds=3600):
-        """Whether cached management keys can be reused."""
-        if not self.mgmt_access_key or not self.mgmt_keys_updated_at:
-            return False
-        age = (timezone.now() - self.mgmt_keys_updated_at).total_seconds()
-        return age < max_age_seconds
-
 
 class TenantMembership(models.Model):
-    """Links a user to a tenant with role and cached S3 credentials.
+    """Links a user to a tenant with role and RGWSquared username.
 
     ceph_username = preferred_username from Authentik JWT.
     This is the subuser name in Ceph: {TENANT}$ext-users:{ceph_username}
@@ -227,11 +194,6 @@ class TenantMembership(models.Model):
     )
     is_active = models.BooleanField(default=True)
 
-    # RGWSquared userInfo credentials are encrypted on save.
-    s3_access_key = models.CharField(max_length=1024, blank=True)
-    s3_secret_key = models.CharField(max_length=1024, blank=True)
-    credentials_updated_at = models.DateTimeField(null=True, blank=True)
-
     class Meta:
         db_table = "tenant_memberships"
         unique_together = [("user", "tenant")]
@@ -249,28 +211,10 @@ class TenantMembership(models.Model):
     def __str__(self):
         return f"{self.ceph_username} @ {self.tenant.code} ({self.role})"
 
-    def save(self, *args, **kwargs):
-        self.s3_access_key = encrypt_if_needed(self.s3_access_key)
-        self.s3_secret_key = encrypt_if_needed(self.s3_secret_key)
-        super().save(*args, **kwargs)
-
     @property
     def ceph_subuser_uid(self):
         """Full Ceph subuser UID: {TENANT}$ext-users:{ceph_username}"""
         return f"{self.tenant.code}$ext-users:{self.ceph_username}"
-
-    def get_s3_credentials(self):
-        return (
-            decrypt_if_needed(self.s3_access_key),
-            decrypt_if_needed(self.s3_secret_key),
-        )
-
-    def credentials_fresh(self, max_age_seconds=300):
-        """Check if cached S3 credentials are still fresh (5 min default)."""
-        if not self.s3_access_key or not self.credentials_updated_at:
-            return False
-        age = (timezone.now() - self.credentials_updated_at).total_seconds()
-        return age < max_age_seconds
 
 
 class Bucket(models.Model):

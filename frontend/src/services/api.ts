@@ -367,7 +367,7 @@ export const adminAPI = {
     return response.data;
   },
 
-  // Operators run RGWSquared sync as explicit steps so failures stay recoverable.
+  // Operators can force RGWSquared refresh; routine upstream sync is scheduled by RGWSquared.
   syncRefresh: async (structureCode: string) => {
     const response = await adminAxios.post('/sync/refresh/', { structure_code: structureCode });
     return response.data;
@@ -383,18 +383,11 @@ export const adminAPI = {
     return response.data;
   },
 
-  syncProposals: async () => {
-    const response = await adminAxios.post('/sync/proposals/', {}, { timeout: 90000 });
-    return response.data;
-  },
-
-  syncGenerate: async (tenantCode: string) => {
-    const response = await adminAxios.post('/sync/generate/', { tenant_code: tenantCode }, { timeout: 90000 });
-    return response.data;
-  },
-
-  syncApply: async (structure: string) => {
-    const response = await adminAxios.post('/sync/apply/', { structure }, { timeout: 90000 });
+  syncUpdateStructure: async (structure: string, updateFromExt = true) => {
+    const response = await adminAxios.post('/sync/update-structure/', {
+      structure,
+      update_from_ext: updateFromExt,
+    }, { timeout: 120000 });
     return response.data;
   },
 };

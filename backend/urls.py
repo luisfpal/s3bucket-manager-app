@@ -24,9 +24,7 @@ from storage.views import (
     admin_uo_mappings,
     admin_sync_refresh,
     admin_sync_upload_csv,
-    admin_sync_proposals,
-    admin_sync_generate,
-    admin_sync_apply,
+    admin_sync_update_structure,
 )
 
 router = DefaultRouter()
@@ -77,9 +75,9 @@ urlpatterns = [
         name="admin_sync_upload_csv",
     ),
     path(
-        "api/admin/sync/proposals/", admin_sync_proposals, name="admin_sync_proposals"
+        "api/admin/sync/update-structure/",
+        admin_sync_update_structure,
+        name="admin_sync_update_structure",
     ),
-    path("api/admin/sync/generate/", admin_sync_generate, name="admin_sync_generate"),
-    path("api/admin/sync/apply/", admin_sync_apply, name="admin_sync_apply"),
     path("api/", include(router.urls)),
 ]

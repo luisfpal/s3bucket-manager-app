@@ -16,9 +16,7 @@ from .admin import (
     admin_uo_mappings,
     admin_sync_refresh,
     admin_sync_upload_csv,
-    admin_sync_proposals,
-    admin_sync_generate,
-    admin_sync_apply,
+    admin_sync_update_structure,
 )
 
 __all__ = [
@@ -40,7 +38,5 @@ __all__ = [
     "admin_uo_mappings",
     "admin_sync_refresh",
     "admin_sync_upload_csv",
-    "admin_sync_proposals",
-    "admin_sync_generate",
-    "admin_sync_apply",
+    "admin_sync_update_structure",
 ]

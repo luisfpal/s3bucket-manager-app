@@ -4,6 +4,7 @@ import logging
 import re
 
 from django.http import HttpResponse
+from django.db import transaction
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -24,15 +25,15 @@ from storage.serializers import (
 )
 from storage.services import permissions as perms
 from storage.services.s3_ops import (
-    create_bucket as s3_create_bucket,
-    delete_bucket as s3_delete_bucket,
+    ensure_structure_initialized,
     list_objects,
     upload_object,
     delete_object,
     download_object,
     get_mgmt_s3_client,
-    get_all_bucket_stats,
+    get_bucket_stats_for_tenant,
 )
+from storage.services.rgw_squared import RGWSquaredClient, RGWSquaredError
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,85 @@ def _get_membership(request):
         )
     except TenantMembership.DoesNotExist:
         return None
+
+
+def _get_rgw_client():
+    from django.conf import settings
+
+    return RGWSquaredClient(
+        settings.RGWSQUARED_URL,
+        settings.RGWSQUARED_USERNAME,
+        settings.RGWSQUARED_PASSWORD,
+    )
+
+
+def _structure_name(tenant):
+    return tenant.rgwsquared_structure or tenant.code
+
+
+def _error_response(message, response_status=status.HTTP_500_INTERNAL_SERVER_ERROR):
+    return Response({"error": str(message)}, status=response_status)
+
+
+def _block_if_storage_uninitialized(tenant):
+    try:
+        ensure_structure_initialized(tenant)
+    except RGWSquaredError as e:
+        return _error_response(e, status.HTTP_400_BAD_REQUEST)
+    except RuntimeError as e:
+        return _error_response(e, status.HTTP_503_SERVICE_UNAVAILABLE)
+    except Exception as e:
+        return _error_response(e, status.HTTP_500_INTERNAL_SERVER_ERROR)
+    return None
+
+
+def _ensure_rgw_user(client, tenant, ceph_username):
+    if not ceph_username:
+        raise RuntimeError("Cannot determine RGWSquared username")
+    structure = _structure_name(tenant)
+    users = client.list_users(structure)
+    if ceph_username not in users:
+        client.create_user(structure, ceph_username)
+
+
+def _sync_local_bucket_permissions(bucket, desired_permissions):
+    """Push local bucket permission state to RGWSquared before DB mutation."""
+    client = _get_rgw_client()
+    ensure_structure_initialized(bucket.tenant, client=client)
+
+    rw_permissions = set()
+    ro_permissions = set()
+    for user_id, permission in desired_permissions.items():
+        membership = (
+            TenantMembership.objects.filter(
+                tenant=bucket.tenant,
+                user_id=user_id,
+                is_active=True,
+            )
+            .select_related("user")
+            .first()
+        )
+        if not membership:
+            continue
+        _ensure_rgw_user(client, bucket.tenant, membership.ceph_username)
+        if permission in ("owner", "rw"):
+            rw_permissions.add(membership.ceph_username)
+        elif permission == "ro":
+            ro_permissions.add(membership.ceph_username)
+
+    client.update_bucket(
+        _structure_name(bucket.tenant),
+        bucket.name,
+        rw_permissions=sorted(rw_permissions),
+        ro_permissions=sorted(ro_permissions),
+    )
+
+
+def _current_local_permission_map(bucket):
+    return {
+        p.user_id: p.permission
+        for p in BucketPermission.objects.filter(bucket=bucket, source="local")
+    }
 
 
 class BucketViewSet(viewsets.ViewSet):
@@ -83,6 +163,9 @@ class BucketViewSet(viewsets.ViewSet):
             )
 
         tenant = membership.tenant
+        blocked = _block_if_storage_uninitialized(tenant)
+        if blocked:
+            return blocked
 
         permitted_bucket_ids = BucketPermission.objects.filter(
             user=request.user,
@@ -93,11 +176,9 @@ class BucketViewSet(viewsets.ViewSet):
             "tenant", "owner"
         )
 
-        # One RGW stats call avoids per-bucket admin API traffic.
-        try:
-            bucket_stats = get_all_bucket_stats()
-        except Exception:
-            bucket_stats = {}
+        bucket_stats = get_bucket_stats_for_tenant(
+            tenant, list(buckets.values_list("name", flat=True))
+        )
 
         serializer = BucketSerializer(
             buckets,
@@ -128,13 +209,6 @@ class BucketViewSet(viewsets.ViewSet):
             )
 
         tenant = membership.tenant
-
-        # Bucket creation uses tenant area-mgmt credentials, not end-user keys.
-        if not tenant.mgmt_access_key or not tenant.mgmt_secret_key:
-            return Response(
-                {"error": f"Bucket operations not yet available for {tenant.code}"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
 
         serializer = BucketCreateSerializer(data=request.data)
         if not serializer.is_valid():
@@ -197,47 +271,52 @@ class BucketViewSet(viewsets.ViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        client = _get_rgw_client()
         try:
-            s3_create_bucket(tenant, bare_name)
-        except ClientError as e:
-            error_code = e.response["Error"]["Code"]
-            if error_code == "BucketAlreadyExists":
-                return Response(
-                    {"error": "Bucket already exists in S3"},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            return Response(
-                {"error": f"S3 error: {e}"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            ensure_structure_initialized(tenant, client=client)
+            _ensure_rgw_user(client, tenant, membership.ceph_username)
+            client.create_bucket(
+                _structure_name(tenant),
+                bare_name,
+                rw_permissions=[membership.ceph_username],
+                ro_permissions=[],
             )
+        except RGWSquaredError as e:
+            return _error_response(e, status.HTTP_400_BAD_REQUEST)
+        except RuntimeError as e:
+            return _error_response(e, status.HTTP_503_SERVICE_UNAVAILABLE)
+        except Exception as e:
+            return _error_response(e, status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         try:
-            bucket = Bucket.objects.create(
-                name=bare_name,
-                tenant=tenant,
-                owner=request.user,
-                bucket_type=Bucket.LOCAL,
-                is_deletable=True,
-                description=serializer.validated_data.get("description", ""),
-                display_name=project_id,
-            )
+            with transaction.atomic():
+                bucket = Bucket.objects.create(
+                    name=bare_name,
+                    tenant=tenant,
+                    owner=request.user,
+                    bucket_type=Bucket.LOCAL,
+                    is_deletable=True,
+                    description=serializer.validated_data.get("description", ""),
+                    display_name=project_id,
+                )
+                BucketPermission.objects.create(
+                    bucket=bucket,
+                    user=request.user,
+                    permission="owner",
+                    source="local",
+                )
         except Exception:
-            # Keep S3 and DB in sync if local metadata creation fails.
+            # Keep RGWSquared and DB in sync if local metadata creation fails.
             try:
-                s3_delete_bucket(tenant, bare_name)
+                client.delete_bucket(_structure_name(tenant), bare_name)
             except Exception:
-                logger.error(f"Orphan S3 bucket: {bare_name} (manual cleanup needed)")
+                logger.error(
+                    f"Orphan RGWSquared bucket: {bare_name} (manual cleanup needed)"
+                )
             return Response(
                 {"error": "Failed to create bucket record"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
-
-        BucketPermission.objects.create(
-            bucket=bucket,
-            user=request.user,
-            permission="owner",
-            source="local",
-        )
 
         return Response(
             BucketSerializer(bucket, context={"user": request.user}).data,
@@ -257,6 +336,10 @@ class BucketViewSet(viewsets.ViewSet):
             return Response(
                 {"error": "Access denied"}, status=status.HTTP_403_FORBIDDEN
             )
+
+        blocked = _block_if_storage_uninitialized(bucket.tenant)
+        if blocked:
+            return blocked
 
         files = []
         try:
@@ -301,12 +384,15 @@ class BucketViewSet(viewsets.ViewSet):
             )
 
         try:
-            s3_delete_bucket(bucket.tenant, bucket.name)
-        except ClientError as e:
-            return Response(
-                {"error": f"S3 error: {e}"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+            client = _get_rgw_client()
+            ensure_structure_initialized(bucket.tenant, client=client)
+            client.delete_bucket(_structure_name(bucket.tenant), bucket.name)
+        except RGWSquaredError as e:
+            return _error_response(e, status.HTTP_400_BAD_REQUEST)
+        except RuntimeError as e:
+            return _error_response(e, status.HTTP_503_SERVICE_UNAVAILABLE)
+        except Exception as e:
+            return _error_response(e, status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         bucket.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
@@ -325,6 +411,10 @@ class BucketViewSet(viewsets.ViewSet):
             return Response(
                 {"error": "No write permission"}, status=status.HTTP_403_FORBIDDEN
             )
+
+        blocked = _block_if_storage_uninitialized(bucket.tenant)
+        if blocked:
+            return blocked
 
         serializer = FileUploadSerializer(data=request.data)
         if not serializer.is_valid():
@@ -376,6 +466,10 @@ class BucketViewSet(viewsets.ViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
+        blocked = _block_if_storage_uninitialized(bucket.tenant)
+        if blocked:
+            return blocked
+
         try:
             s3 = get_mgmt_s3_client(bucket.tenant)
             delete_object(s3, bucket.name, file_key)
@@ -403,6 +497,10 @@ class BucketViewSet(viewsets.ViewSet):
             return Response(
                 {"error": "Access denied"}, status=status.HTTP_403_FORBIDDEN
             )
+
+        blocked = _block_if_storage_uninitialized(bucket.tenant)
+        if blocked:
+            return blocked
 
         try:
             s3 = get_mgmt_s3_client(bucket.tenant)
@@ -610,6 +708,17 @@ class BucketViewSet(viewsets.ViewSet):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
+            desired = _current_local_permission_map(bucket)
+            desired[target_user.id] = permission
+            try:
+                _sync_local_bucket_permissions(bucket, desired)
+            except RGWSquaredError as e:
+                return _error_response(e, status.HTTP_400_BAD_REQUEST)
+            except RuntimeError as e:
+                return _error_response(e, status.HTTP_503_SERVICE_UNAVAILABLE)
+            except Exception as e:
+                return _error_response(e, status.HTTP_500_INTERNAL_SERVER_ERROR)
+
             share, created = BucketPermission.objects.update_or_create(
                 bucket=bucket,
                 user=target_user,
@@ -627,6 +736,29 @@ class BucketViewSet(viewsets.ViewSet):
 
         if request.method == "DELETE":
             share_id = request.data.get("share_id")
+            share = (
+                BucketPermission.objects.filter(
+                    id=share_id,
+                    bucket=bucket,
+                    source="local",
+                )
+                .exclude(user=request.user)
+                .first()
+            )
+            if not share:
+                return Response(
+                    {"error": "Share not found"}, status=status.HTTP_404_NOT_FOUND
+                )
+            desired = _current_local_permission_map(bucket)
+            desired.pop(share.user_id, None)
+            try:
+                _sync_local_bucket_permissions(bucket, desired)
+            except RGWSquaredError as e:
+                return _error_response(e, status.HTTP_400_BAD_REQUEST)
+            except RuntimeError as e:
+                return _error_response(e, status.HTTP_503_SERVICE_UNAVAILABLE)
+            except Exception as e:
+                return _error_response(e, status.HTTP_500_INTERNAL_SERVER_ERROR)
             deleted, _ = (
                 BucketPermission.objects.filter(
                     id=share_id,
@@ -656,8 +788,18 @@ class BucketViewSet(viewsets.ViewSet):
                 {"error": "Owner cannot leave their own bucket"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        desired = _current_local_permission_map(bucket)
+        desired.pop(request.user.id, None)
+        try:
+            _sync_local_bucket_permissions(bucket, desired)
+        except RGWSquaredError as e:
+            return _error_response(e, status.HTTP_400_BAD_REQUEST)
+        except RuntimeError as e:
+            return _error_response(e, status.HTTP_503_SERVICE_UNAVAILABLE)
+        except Exception as e:
+            return _error_response(e, status.HTTP_500_INTERNAL_SERVER_ERROR)
         deleted, _ = BucketPermission.objects.filter(
-            bucket=bucket, user=request.user
+            bucket=bucket, user=request.user, source="local"
         ).delete()
         if not deleted:
             return Response(
@@ -683,6 +825,9 @@ class BucketViewSet(viewsets.ViewSet):
             return Response(
                 {"error": "Access denied"}, status=status.HTTP_403_FORBIDDEN
             )
+        blocked = _block_if_storage_uninitialized(bucket.tenant)
+        if blocked:
+            return blocked
         try:
             s3 = get_mgmt_s3_client(bucket.tenant)
             obj = s3.get_object(Bucket=bucket.name, Key=file_key, Range="bytes=0-7")

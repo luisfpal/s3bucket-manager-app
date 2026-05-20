@@ -390,16 +390,16 @@ def _sync_group_user_buckets(user, ceph_username, tenants):
                 ro_buckets = info.get("ROBuckets", [])
                 rw_buckets = info.get("RWBuckets", [])
 
-                # Refresh credentials for the matching RGWSquared membership.
                 from storage.models import TenantMembership
 
                 TenantMembership.objects.filter(user=user, tenant=tenant).update(
-                    s3_access_key=info.get("access_key", ""),
-                    s3_secret_key=info.get("secret_key", ""),
                     role="rw" if rw_buckets else "ro",
                 )
 
-                _sync_user_buckets_on_login(user, tenant, ro_buckets, rw_buckets)
+                bucket_items = client.list_buckets(tenant.rgwsquared_structure)
+                _sync_user_buckets_on_login(
+                    user, tenant, ro_buckets, rw_buckets, bucket_items=bucket_items
+                )
             except Exception as e:
                 logger.warning(f"Group user bucket sync failed for {tenant.code}: {e}")
     except Exception as e:
@@ -448,8 +448,6 @@ def _rgwsquared_tenant_lookup(user, ceph_username):
                     defaults={
                         "ceph_username": ceph_username,
                         "role": role,
-                        "s3_access_key": info.get("access_key", ""),
-                        "s3_secret_key": info.get("secret_key", ""),
                     },
                 )
                 if created:
@@ -458,16 +456,14 @@ def _rgwsquared_tenant_lookup(user, ceph_username):
                         f"{user.username} → {tenant.code} (role={role}, "
                         f"RO={len(ro_buckets)}, RW={len(rw_buckets)})"
                     )
-                elif not membership.s3_access_key:
-                    # Login must have usable S3 keys even if the placeholder predates sync.
-                    membership.s3_access_key = info.get("access_key", "")
-                    membership.s3_secret_key = info.get("secret_key", "")
+                elif membership.role != role:
                     membership.role = role
-                    membership.save(
-                        update_fields=["s3_access_key", "s3_secret_key", "role"]
-                    )
+                    membership.save(update_fields=["role"])
 
-                _sync_user_buckets_on_login(user, tenant, ro_buckets, rw_buckets)
+                bucket_items = client.list_buckets(structure)
+                _sync_user_buckets_on_login(
+                    user, tenant, ro_buckets, rw_buckets, bucket_items=bucket_items
+                )
 
                 matched.append(tenant.code)
 
@@ -481,7 +477,9 @@ def _rgwsquared_tenant_lookup(user, ceph_username):
     return matched
 
 
-def _sync_user_buckets_on_login(user, tenant, ro_bucket_names, rw_bucket_names):
+def _sync_user_buckets_on_login(
+    user, tenant, ro_bucket_names, rw_bucket_names, bucket_items=None
+):
     """Create Bucket and BucketPermission records for a user's RGWSquared buckets.
 
     Called during login to ensure proposal buckets are visible immediately.
@@ -490,12 +488,27 @@ def _sync_user_buckets_on_login(user, tenant, ro_bucket_names, rw_bucket_names):
     from storage.models import Bucket, BucketPermission
     from storage.services.s3_ops import parse_rgwsquared_bucket_name
 
+    auto_bucket_names = None
+    if bucket_items is not None:
+        auto_bucket_names = set()
+        for item in bucket_items:
+            if isinstance(item, str):
+                auto_bucket_names.add(parse_rgwsquared_bucket_name(item, tenant.code))
+            elif item.get("auto"):
+                name = item.get("name") or item.get("id")
+                if name:
+                    auto_bucket_names.add(
+                        parse_rgwsquared_bucket_name(str(name), tenant.code)
+                    )
+
     all_buckets = [(name, "rw") for name in rw_bucket_names] + [
         (name, "ro") for name in ro_bucket_names
     ]
 
     for ms_name, perm in all_buckets:
         bare_name = parse_rgwsquared_bucket_name(ms_name, tenant.code)
+        if auto_bucket_names is not None and bare_name not in auto_bucket_names:
+            continue
 
         # Proposal buckets come from RGWSquared and are never locally deletable.
         bucket, created = Bucket.objects.get_or_create(

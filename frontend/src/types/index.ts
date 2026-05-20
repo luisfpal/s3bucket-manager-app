@@ -146,7 +146,9 @@ export interface AdminTenant {
   member_count: number;
   bucket_count: number;
   storage_bytes: number;
-  mgmt_keys_updated_at: string | null;
+  initialized: boolean;
+  buckets_auto: number;
+  buckets_manual: number;
 }
 
 export interface AdminGroupMapping {
@@ -167,4 +169,7 @@ export interface AdminAvailableTenant {
   structure: string;
   has_tenant: boolean;
   tenant_id: number | null;
+  initialized: boolean;
+  buckets_auto: number;
+  buckets_manual: number;
 }

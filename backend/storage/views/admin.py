@@ -25,14 +25,13 @@ from storage.models import (
     GroupTenantMapping,
 )
 from storage.services.s3_ops import (
-    get_all_bucket_stats,
-    fetch_mgmt_keys,
+    ensure_structure_initialized,
     get_mgmt_s3_client,
-    delete_bucket as s3_delete_bucket,
     delete_object,
+    get_bucket_stats_for_tenant,
 )
 from storage.services.sync_service import refresh_local_cache
-from storage.services.rgw_squared import RGWSquaredClient
+from storage.services.rgw_squared import RGWSquaredClient, RGWSquaredError
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +45,14 @@ def _get_sync_client():
         username=settings.RGWSQUARED_USERNAME,
         password=settings.RGWSQUARED_PASSWORD,
     )
+
+
+def _structure_name(tenant):
+    return tenant.rgwsquared_structure or tenant.code
+
+
+def _error_response(message, response_status=status.HTTP_500_INTERNAL_SERVER_ERROR):
+    return Response({"error": str(message)}, status=response_status)
 
 
 @api_view(["POST"])
@@ -126,7 +133,7 @@ def admin_permissions(request):
 def admin_buckets(request):
     """All buckets with storage stats from RGW."""
     try:
-        buckets = (
+        buckets = list(
             Bucket.objects.select_related("tenant", "owner")
             .annotate(
                 shares_count=Count(
@@ -137,8 +144,10 @@ def admin_buckets(request):
             .order_by("tenant__code", "name")
         )
 
-        # Keep admin bucket tables fast by fetching RGW stats once.
-        stats = get_all_bucket_stats()
+        stats = {}
+        for tenant in Tenant.objects.filter(is_active=True):
+            names = [b.name for b in buckets if b.tenant_id == tenant.id]
+            stats.update(get_bucket_stats_for_tenant(tenant, names))
 
         return Response(
             [
@@ -181,12 +190,15 @@ def admin_bucket_detail(request, bucket_id):
                 status=status.HTTP_403_FORBIDDEN,
             )
         try:
-            s3_delete_bucket(bucket.tenant, bucket.name)
+            client = _get_sync_client()
+            ensure_structure_initialized(bucket.tenant, client=client)
+            client.delete_bucket(_structure_name(bucket.tenant), bucket.name)
+        except RGWSquaredError as e:
+            return _error_response(e, status.HTTP_400_BAD_REQUEST)
+        except RuntimeError as e:
+            return _error_response(e, status.HTTP_503_SERVICE_UNAVAILABLE)
         except Exception as e:
-            return Response(
-                {"error": f"S3 error: {e}"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+            return _error_response(e, status.HTTP_500_INTERNAL_SERVER_ERROR)
         bucket.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -226,8 +238,13 @@ def admin_delete_file(request, bucket_id, file_key):
         return Response({"error": "Bucket not found"}, status=status.HTTP_404_NOT_FOUND)
 
     try:
+        ensure_structure_initialized(bucket.tenant)
         s3 = get_mgmt_s3_client(bucket.tenant)
         delete_object(s3, bucket.name, file_key)
+    except RGWSquaredError as e:
+        return _error_response(e, status.HTTP_400_BAD_REQUEST)
+    except RuntimeError as e:
+        return _error_response(e, status.HTTP_503_SERVICE_UNAVAILABLE)
     except Exception as e:
         return Response(
             {"error": f"Delete failed: {e}"},
@@ -288,16 +305,26 @@ def admin_tenants(request):
             .order_by("code")
         )
 
-        # RGW reports per-bucket stats; aggregate here for tenant dashboards.
-        stats = get_all_bucket_stats()
         tenant_storage = {}
-        for bucket in Bucket.objects.filter(tenant__is_active=True).values(
-            "name", "tenant__code"
-        ):
-            code = bucket["tenant__code"]
-            bucket_stats = stats.get(bucket["name"], {})
-            tenant_storage.setdefault(code, 0)
-            tenant_storage[code] += bucket_stats.get("size_bytes", 0)
+        structure_status = {}
+        client = _get_sync_client()
+        for tenant in tenants:
+            tenant_buckets = list(
+                Bucket.objects.filter(tenant=tenant).values_list("name", flat=True)
+            )
+            stats = get_bucket_stats_for_tenant(tenant, tenant_buckets)
+            tenant_storage[tenant.code] = sum(
+                bucket_stats.get("size_bytes", 0) for bucket_stats in stats.values()
+            )
+            try:
+                info = client.get_structure_info(_structure_name(tenant))
+            except Exception:
+                info = {}
+            structure_status[tenant.code] = {
+                "initialized": bool(info.get("initialized")),
+                "buckets_auto": info.get("bucketsAuto", 0),
+                "buckets_manual": info.get("bucketsManual", 0),
+            }
 
         return Response(
             [
@@ -308,7 +335,7 @@ def admin_tenants(request):
                     "member_count": t.member_count,
                     "bucket_count": t.bucket_count,
                     "storage_bytes": tenant_storage.get(t.code, 0),
-                    "mgmt_keys_updated_at": t.mgmt_keys_updated_at,
+                    **structure_status.get(t.code, {}),
                 }
                 for t in tenants
             ]
@@ -370,12 +397,6 @@ def admin_group_mappings(request):
 
     mapping = GroupTenantMapping.objects.create(authentik_group=group, tenant=tenant)
 
-    # Cache area-mgmt keys immediately so bucket operations work after mapping.
-    try:
-        fetch_mgmt_keys(tenant)
-    except Exception as e:
-        logger.warning(f"Could not fetch mgmt keys for {tenant.code}: {e}")
-
     return Response(
         {
             "id": mapping.id,
@@ -419,18 +440,25 @@ def admin_available_tenants(request):
 
     existing = set(Tenant.objects.values_list("code", flat=True))
 
-    return Response(
-        [
+    data = []
+    for s in structures:
+        try:
+            info = client.get_structure_info(s)
+        except Exception:
+            info = {}
+        data.append(
             {
                 "structure": s,
                 "has_tenant": s in existing,
                 "tenant_id": Tenant.objects.filter(code=s)
                 .values_list("id", flat=True)
                 .first(),
+                "initialized": bool(info.get("initialized")),
+                "buckets_auto": info.get("bucketsAuto", 0),
+                "buckets_manual": info.get("bucketsManual", 0),
             }
-            for s in structures
-        ]
-    )
+        )
+    return Response(data)
 
 
 @api_view(["GET"])
@@ -495,7 +523,7 @@ def admin_sync_refresh(request):
 @api_view(["POST"])
 @permission_classes([IsAdminUser])
 def admin_sync_upload_csv(request):
-    """Upload instruments CSV to RGWSquared (extCSVUpload)."""
+    """Upload instruments CSV to RGWSquared (csvUpload)."""
     csv_file = request.FILES.get("file")
     if not csv_file:
         return Response(
@@ -552,49 +580,15 @@ def admin_sync_upload_csv(request):
 
 @api_view(["POST"])
 @permission_classes([IsAdminUser])
-def admin_sync_proposals(request):
-    """Fetch proposals from external API (extEPSync). Step 2 of sync pipeline."""
-    try:
-        client = _get_sync_client()
-        result = client.sync_proposals()
-        return Response(result)
-    except Exception as e:
-        logger.error(f"Proposals sync failed: {e}")
-        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
-@api_view(["POST"])
-@permission_classes([IsAdminUser])
-def admin_sync_generate(request):
-    """Generate structure definition in CouchDB. Step 3 of sync pipeline."""
-    tenant_code = request.data.get("tenant_code", "NFFADI")
-
-    try:
-        client = _get_sync_client()
-        result = client.sync_structure(tenant_code)
-        return Response(result)
-    except Exception as e:
-        logger.error(f"Structure generation failed for {tenant_code}: {e}")
-        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
-@api_view(["POST"])
-@permission_classes([IsAdminUser])
-def admin_sync_apply(request):
-    """Apply structure to Ceph RGW. Step 4. May 504 — server continues."""
+def admin_sync_update_structure(request):
+    """Trigger RGWSquared structureUpdate. Ceph sync is internal to RGWSquared."""
     structure = request.data.get("structure", "NFFADI")
+    update_from_ext = request.data.get("update_from_ext", True)
 
     try:
         client = _get_sync_client()
-        result = client.apply_to_ceph(structure)
-        if result is not None:
-            return Response({"status": "completed", "result": result})
-        return Response(
-            {
-                "status": "in_progress",
-                "message": "Ceph sync continues server-side (504/timeout)",
-            }
-        )
+        result = client.update_structure(structure, update_from_ext=update_from_ext)
+        return Response(result)
     except Exception as e:
-        logger.error(f"Ceph apply failed for {structure}: {e}")
+        logger.error(f"Structure update failed for {structure}: {e}")
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

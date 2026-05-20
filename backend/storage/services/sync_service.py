@@ -3,14 +3,13 @@
 Main operation:
     refresh_local_cache: Pull users/buckets/permissions from RGWSquared into Django DB
 
-The full sync pipeline (CSV upload → proposals → generate → apply → refresh)
-is orchestrated by the frontend via individual admin API endpoints.
+The admin sync pipeline asks RGWSquared to update its structure, then refreshes
+this local cache from RGWSquared's current JSON state.
 """
 
 import logging
 
 from django.conf import settings
-from django.utils import timezone
 
 from storage.models import (
     TenantMembership,
@@ -19,7 +18,7 @@ from storage.models import (
     User,
 )
 from storage.services.rgw_squared import RGWSquaredClient
-from storage.services.s3_ops import parse_rgwsquared_bucket_name, get_mgmt_s3_client
+from storage.services.s3_ops import parse_rgwsquared_bucket_name
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +36,9 @@ def refresh_local_cache(tenant, client=None):
     """Sync RGWSquared state into Django DB.
 
     Fetches user list and bucket list from RGWSquared, then:
-    - Creates/updates TenantMembership with S3 credentials and role
+    - Creates/updates TenantMembership with role
     - Creates/updates Bucket records for proposal buckets
-    - Creates/updates BucketPermission records from ROBuckets/RWBuckets
+    - Creates/updates BucketPermission records for RGWSquared auto buckets
 
     Returns summary dict with counts.
     """
@@ -55,44 +54,84 @@ def refresh_local_cache(tenant, client=None):
     structure = tenant.rgwsquared_structure
     stats = {"users_synced": 0, "buckets_synced": 0, "permissions_synced": 0}
     synced_ceph_usernames = set()
+    proposal_bucket_ids_by_name = {}
 
-    # RGWSquared does not own the Django bucket table; S3 is the source of truth.
     try:
-        s3 = get_mgmt_s3_client(tenant)
-        s3_response = s3.list_buckets()
-        s3_bucket_names = [b["Name"] for b in s3_response.get("Buckets", [])]
+        structure_info = client.get_structure_info(structure)
     except Exception as e:
-        logger.warning(f"Could not list S3 buckets for {tenant.code}: {e}")
-        s3_bucket_names = []
+        logger.warning(f"Could not fetch structureInfo for {tenant.code}: {e}")
+        structure_info = {}
 
-    for bare_name in s3_bucket_names:
+    stats["initialized"] = bool(structure_info.get("initialized"))
+
+    try:
+        rgw_buckets = client.list_buckets(structure)
+    except Exception as e:
+        logger.warning(f"Could not list RGWSquared buckets for {tenant.code}: {e}")
+        rgw_buckets = []
+
+    for item in rgw_buckets:
+        if isinstance(item, str):
+            bucket_name = item
+            is_auto = True
+            is_manual = False
+        else:
+            bucket_name = item.get("name") or item.get("id")
+            is_auto = bool(item.get("auto"))
+            is_manual = bool(item.get("manual"))
+        if not bucket_name:
+            continue
+
+        bare_name = parse_rgwsquared_bucket_name(str(bucket_name), tenant.code)
+        bucket_type = Bucket.LOCAL if is_manual and not is_auto else Bucket.PROPOSAL
         bucket, created = Bucket.objects.get_or_create(
             name=bare_name,
             tenant=tenant,
             defaults={
-                "bucket_type": Bucket.PROPOSAL,
-                "is_deletable": False,
+                "bucket_type": bucket_type,
+                "is_deletable": bucket_type == Bucket.LOCAL,
                 "display_name": bare_name,
             },
         )
-        if not created and bucket.bucket_type == Bucket.PROPOSAL:
-            if bucket.display_name != bare_name:
+        if not created:
+            update_fields = []
+            if bucket.display_name != bare_name and bucket.bucket_type == Bucket.PROPOSAL:
                 bucket.display_name = bare_name
-                bucket.save(update_fields=["display_name"])
+                update_fields.append("display_name")
+            if bucket.bucket_type == Bucket.PROPOSAL and bucket.is_deletable:
+                bucket.is_deletable = False
+                update_fields.append("is_deletable")
+            if update_fields:
+                bucket.save(update_fields=update_fields)
+
+        if bucket.bucket_type == Bucket.PROPOSAL:
+            proposal_bucket_ids_by_name[bare_name] = bucket.id
         stats["buckets_synced"] += 1
 
     ms_users = client.list_users(structure)
     for username in ms_users:
-        user_info = client.get_user_info(structure, username)
+        synced_ceph_usernames.add(username)
+        try:
+            user_info = client.get_user_info(structure, username)
+        except Exception as e:
+            logger.warning(
+                f"Could not fetch userInfo for {username} in {structure}: {e}"
+            )
+            stats["user_errors"] = stats.get("user_errors", 0) + 1
+            continue
         if not user_info:
             logger.warning(f"Empty userInfo for {username} in {structure}")
             continue
 
-        synced_ceph_usernames.add(username)
-
-        rw_buckets = user_info.get("RWBuckets", [])
-        ro_buckets = user_info.get("ROBuckets", [])
-        role = "rw" if rw_buckets else "ro"
+        user_perms = {
+            "rw": _bucket_ids_from_user_info(
+                user_info.get("RWBuckets", []), proposal_bucket_ids_by_name, tenant
+            ),
+            "ro": _bucket_ids_from_user_info(
+                user_info.get("ROBuckets", []), proposal_bucket_ids_by_name, tenant
+            ),
+        }
+        role = "rw" if user_perms["rw"] else "ro"
 
         # Authentik may sanitize usernames, so match through membership before creating.
         try:
@@ -124,9 +163,7 @@ def refresh_local_cache(tenant, client=None):
             defaults={
                 "ceph_username": username,
                 "role": role,
-                "s3_access_key": user_info.get("access_key", ""),
-                "s3_secret_key": user_info.get("secret_key", ""),
-                "credentials_updated_at": timezone.now(),
+                "is_active": True,
             },
         )
 
@@ -147,8 +184,10 @@ def refresh_local_cache(tenant, client=None):
 
         stats["users_synced"] += 1
 
-        _sync_user_permissions(user, tenant, rw_buckets, ro_buckets)
-        stats["permissions_synced"] += len(rw_buckets) + len(ro_buckets)
+        synced_count = _sync_user_permissions(
+            user, tenant, user_perms["rw"], user_perms["ro"]
+        )
+        stats["permissions_synced"] += synced_count
 
     # Remove only RGWSquared-derived access; local sharing is user-managed state.
     stale_memberships = (
@@ -169,18 +208,8 @@ def refresh_local_cache(tenant, client=None):
             bucket__tenant=tenant,
             source="rgwsquared",
         ).delete()
-        m.s3_access_key = ""
-        m.s3_secret_key = ""
-        m.credentials_updated_at = None
         m.is_active = False
-        m.save(
-            update_fields=[
-                "s3_access_key",
-                "s3_secret_key",
-                "credentials_updated_at",
-                "is_active",
-            ]
-        )
+        m.save(update_fields=["is_active"])
         logger.info(
             f"Deactivated stale membership: {m.ceph_username} in {tenant.code} ({perms_deleted} perms removed)"
         )
@@ -192,7 +221,18 @@ def refresh_local_cache(tenant, client=None):
     return stats
 
 
-def _sync_user_permissions(user, tenant, rw_bucket_names, ro_bucket_names):
+def _bucket_ids_from_user_info(bucket_names, bucket_ids_by_name, tenant):
+    """Resolve RGWSquared userInfo bucket references to proposal bucket IDs."""
+    bucket_ids = set()
+    for name in bucket_names or []:
+        bare_name = parse_rgwsquared_bucket_name(str(name), tenant.code)
+        bucket_id = bucket_ids_by_name.get(bare_name)
+        if bucket_id:
+            bucket_ids.add(bucket_id)
+    return bucket_ids
+
+
+def _sync_user_permissions(user, tenant, rw_bucket_ids, ro_bucket_ids):
     """Update BucketPermission records for a user from RGWSquared data.
 
     Uses update_or_create to avoid race conditions with local sharing.
@@ -200,40 +240,29 @@ def _sync_user_permissions(user, tenant, rw_bucket_names, ro_bucket_names):
     """
     synced_bucket_ids = set()
 
-    for ms_name in rw_bucket_names:
-        bare_name = parse_rgwsquared_bucket_name(ms_name, tenant.code)
-        try:
-            bucket = Bucket.objects.get(name=bare_name, tenant=tenant)
-        except Bucket.DoesNotExist:
-            logger.warning(f"Bucket {bare_name} not found for permission sync")
-            continue
+    for bucket_id in rw_bucket_ids:
         BucketPermission.objects.update_or_create(
-            bucket=bucket,
+            bucket_id=bucket_id,
             user=user,
             source="rgwsquared",
             defaults={"permission": "rw"},
         )
-        synced_bucket_ids.add(bucket.id)
+        synced_bucket_ids.add(bucket_id)
 
     # RW wins if RGWSquared returns the same bucket in both lists.
-    for ms_name in ro_bucket_names:
-        bare_name = parse_rgwsquared_bucket_name(ms_name, tenant.code)
-        try:
-            bucket = Bucket.objects.get(name=bare_name, tenant=tenant)
-        except Bucket.DoesNotExist:
-            logger.warning(f"Bucket {bare_name} not found for permission sync")
-            continue
-        if bucket.id not in synced_bucket_ids:
+    for bucket_id in ro_bucket_ids:
+        if bucket_id not in synced_bucket_ids:
             BucketPermission.objects.update_or_create(
-                bucket=bucket,
+                bucket_id=bucket_id,
                 user=user,
                 source="rgwsquared",
                 defaults={"permission": "ro"},
             )
-            synced_bucket_ids.add(bucket.id)
+            synced_bucket_ids.add(bucket_id)
 
     BucketPermission.objects.filter(
         user=user,
         bucket__tenant=tenant,
         source="rgwsquared",
     ).exclude(bucket_id__in=synced_bucket_ids).delete()
+    return len(synced_bucket_ids)
