@@ -3,7 +3,7 @@ apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: sync-all-tenants
-  namespace: storage-system
+  namespace: bucket-explorer
 spec:
   schedule: "*/10 * * * *"
   concurrencyPolicy: Forbid
@@ -17,8 +17,8 @@ spec:
           restartPolicy: Never
           containers:
             - name: sync
-              image: registry.stencil.com:5000/s3mgr-backend:latest
-              imagePullPolicy: IfNotPresent
+              image: ghcr.io/luisfpal/bucket-explorer-backend:latest
+              imagePullPolicy: Always
               command:
                 - python
                 - manage.py

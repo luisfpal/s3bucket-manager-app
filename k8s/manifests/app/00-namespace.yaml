@@ -3,7 +3,7 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: storage-system
+  name: bucket-explorer
   labels:
-    name: storage-system
-    app: s3-bucket-manager
+    name: bucket-explorer
+    app: bucket-explorer

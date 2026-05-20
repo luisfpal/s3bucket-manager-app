@@ -1,5 +1,5 @@
 {
-  "name": "s3bucket-manager-frontend",
+  "name": "bucket-manager-frontend",
   "version": "1.0.0",
   "description": "React frontend for S3 Bucket Manager",
   "type": "module",

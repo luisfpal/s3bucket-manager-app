@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: backend-config
-  namespace: storage-system
+  namespace: bucket-explorer
 data:
   DJANGO_DEBUG: "False"
   DJANGO_ALLOWED_HOSTS: "REPLACE_WITH_PROD_ALLOWED_HOSTS"
@@ -17,10 +17,17 @@ data:
   S3_ENDPOINT: "REPLACE_WITH_PROD_S3_ENDPOINT"
   S3_USE_SSL: "True"
   S3_VERIFY_SSL: "True"
-  S3_REGION: "us-east-1"
+  S3_REGION: "eu-south-1"
+  
 
-  AUTHENTIK_URL: "http://authentik-service:9000"
+  # In production, Authentik is external. Both AUTHENTIK_URL and AUTHENTIK_EXTERNAL_URL
+  # are the same public URL (e.g. https://orfeo-auth.areasciencepark.it).
+  AUTHENTIK_URL: "REPLACE_WITH_PROD_AUTHENTIK_URL"
   AUTHENTIK_EXTERNAL_URL: "REPLACE_WITH_PROD_AUTHENTIK_EXTERNAL_URL"
-  OIDC_CLIENT_ID: "bucket-manager"
+  OIDC_CLIENT_ID: "REPLACE_WITH_PROD_OIDC_CLIENT_ID"
+  # OIDC_APPLICATION_SLUG: the slug from the admin's OIDC discovery URL.
+  # Example: if the URL is https://authentik.example.com/application/o/my-app/.well-known/...
+  # then set this to "my-app". For orfeo: "buckets-explorer"
+  OIDC_APPLICATION_SLUG: "REPLACE_WITH_PROD_OIDC_APPLICATION_SLUG"
 
   RGWSQUARED_URL: "REPLACE_WITH_PROD_RGWSQUARED_URL"

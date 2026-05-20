@@ -1,0 +1,11 @@
+# Namespace for Authentik identity infrastructure.
+# Kept separate from the webapp namespace (bucket-explorer) to emulate production,
+# where Authentik is provisioned by infrastructure administrators independently
+# of the application deployment.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: authentik-bucket-explorer
+  labels:
+    name: authentik-bucket-explorer
+    app: bucket-explorer

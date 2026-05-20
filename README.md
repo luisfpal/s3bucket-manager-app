@@ -8,7 +8,7 @@ A web application for managing S3 buckets on **Ceph RADOS Gateway (RGW)**, deplo
 flowchart LR
     Browser[Browser]
 
-    subgraph K3s[K3s namespace: storage-system]
+    subgraph K3s[K3s namespace: bucket-manager]
       FE[nginx + React SPA]
       BE[Django REST API]
       PG[(django-postgres)]
@@ -162,10 +162,10 @@ The script will:
 export KUBECONFIG=/tmp/k3s-tunnel-kubeconfig.yaml
 
 # Terminal 1: React frontend
-kubectl port-forward -n storage-system svc/frontend-service 3000:80
+kubectl port-forward -n bucket-manager svc/frontend-service 3000:80
 
 # Terminal 2: Authentik (for OAuth2 login)
-kubectl port-forward -n storage-system svc/authentik-service 9000:9000
+kubectl port-forward -n bucket-manager svc/authentik-service 9000:9000
 ```
 
 **Step 2 — If the deployment host is remote, create SSH local forwards from your workstation:**
@@ -222,7 +222,7 @@ cd k8s
 
 # Changed a K8s manifest (YAML)? Apply it directly:
 export KUBECONFIG=/tmp/k3s-tunnel-kubeconfig.yaml
-kubectl apply -f manifests/05-backend.yaml -n storage-system
+kubectl apply -f manifests/05-backend.yaml -n bucket-manager
 ./dev.sh restart backend
 ```
 
@@ -230,14 +230,14 @@ kubectl apply -f manifests/05-backend.yaml -n storage-system
 
 ```bash
 # 1. Build container image
-podman build -t <registry>/s3mgr-backend:latest -f backend/Containerfile backend/
+podman build -t <registry>/bucket-manager-backend:latest -f backend/Containerfile backend/
 
 # 2. Push to the configured registry
-podman push <registry>/s3mgr-backend:latest
+podman push <registry>/bucket-manager-backend:latest
 
 # 3. Restart the deployment (picks up new image)
-kubectl rollout restart deployment/backend -n storage-system
-kubectl rollout status deployment/backend -n storage-system --timeout=120s
+kubectl rollout restart deployment/backend -n bucket-manager
+kubectl rollout status deployment/backend -n bucket-manager --timeout=120s
 ```
 
 ### Start of Day / After Reboot
@@ -365,11 +365,11 @@ The S3 endpoint is runtime configuration. Update the ConfigMap/Secret values and
 ```bash
 export KUBECONFIG=/path/to/kubeconfig
 
-kubectl patch configmap backend-config -n storage-system --type merge \
+kubectl patch configmap backend-config -n bucket-manager --type merge \
   -p '{"data":{"S3_ENDPOINT":"https://<s3-rgw-endpoint>","S3_VERIFY_SSL":"True"}}' && \
-kubectl patch secret backend-secret -n storage-system \
+kubectl patch secret backend-secret -n bucket-manager \
   -p '{"stringData":{"s3-access-key":"<access-key>","s3-secret-key":"<secret-key>"}}' && \
-kubectl rollout restart deployment/backend -n storage-system
+kubectl rollout restart deployment/backend -n bucket-manager
 ```
 
 > **Note:** `k8s/manifests/05-backend.yaml` references environment overlay resources. A full `./dev.sh deploy --env <env>` reapplies overlay defaults.
@@ -379,7 +379,7 @@ kubectl rollout restart deployment/backend -n storage-system
 | Symptom                                 | Likely cause                                                         | First check                                                                        |
 | --------------------------------------- | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
 | `kubectl` hangs or connection refused | Kubeconfig, tunnel, or API reachability issue                        | `./dev.sh check`                                                                 |
-| Backend CrashLoopBackOff                | PostgreSQL, Authentik, or required secret missing                    | `kubectl logs <pod> -n storage-system --all-containers`                          |
+| Backend CrashLoopBackOff                | PostgreSQL, Authentik, or required secret missing                    | `kubectl logs <pod> -n bucket-manager --all-containers`                          |
 | Login redirects fail                    | Authentik provider/client not configured for the active callback URL | Re-run `./dev.sh deploy --env <env>` and inspect `configure_authentik.py` logs |
 | S3 `AccessDenied`                     | Wrong tenant credentials or stale RGWSquared sync data               | Check `backend-secret` and run the admin sync flow                               |
 | S3 connection errors                    | Ceph RGW endpoint, TLS, or network failure                           | Check `S3_ENDPOINT`, `S3_VERIFY_SSL`, and Ceph RGW health                      |

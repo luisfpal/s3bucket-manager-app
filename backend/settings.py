@@ -167,9 +167,13 @@ AUTHENTICATION_BACKENDS = (
 )
 
 AUTHENTIK_URL = os.getenv("AUTHENTIK_URL", "http://authentik-service:9000")
-SOCIAL_AUTH_AUTHENTIK_OIDC_ENDPOINT = f"{AUTHENTIK_URL}/application/o/bucket-manager"
+# OIDC_APPLICATION_SLUG is the Authentik application slug — the path component in the OIDC
+# discovery URL: {AUTHENTIK_URL}/application/o/{slug}/.well-known/openid-configuration
+# Dev: "bucket-explorer"  |  Prod: the slug the admin used (e.g. "buckets-explorer")
+OIDC_APPLICATION_SLUG = os.getenv("OIDC_APPLICATION_SLUG", "bucket-explorer")
+SOCIAL_AUTH_AUTHENTIK_OIDC_ENDPOINT = f"{AUTHENTIK_URL}/application/o/{OIDC_APPLICATION_SLUG}"
 
-SOCIAL_AUTH_AUTHENTIK_KEY = os.getenv("OIDC_CLIENT_ID", "bucket-manager")
+SOCIAL_AUTH_AUTHENTIK_KEY = os.getenv("OIDC_CLIENT_ID", "bucket-explorer")
 SOCIAL_AUTH_AUTHENTIK_SECRET = require_non_debug_env(
     "OIDC_CLIENT_SECRET",
     os.getenv("OIDC_CLIENT_SECRET", ""),
@@ -216,7 +220,7 @@ SOCIAL_AUTH_AUTHENTIK_USER_FIELDS = ["email", "username", "external_id", "idp_so
 # Session configuration (OAuth2 handshake only)
 
 SESSION_ENGINE = "django.contrib.sessions.backends.db"
-SESSION_COOKIE_NAME = "s3mgr_oauth_session"
+SESSION_COOKIE_NAME = "bucket_manager_oauth_session"
 SESSION_COOKIE_AGE = 300  # 5 minutes - only needed during OAuth2 handshake
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = "Lax"

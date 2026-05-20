@@ -5,7 +5,7 @@ Required env vars:
 - AUTHENTIK_BOOTSTRAP_PASSWORD
 
 Optional env vars:
-- OIDC_CLIENT_ID (default: bucket-manager)
+- OIDC_CLIENT_ID (default: bucket-explorer)
 - PUBLIC_APP_URL (default: http://localhost:3000)
 """
 
@@ -25,10 +25,10 @@ from authentik.flows.models import Flow, FlowStageBinding
 def configure():
     print("Starting automated Authentik configuration...")
 
-    PROVIDER_NAME = "bucket-manager-provider"
+    PROVIDER_NAME = "bucket-explorer-provider"
     APP_NAME = "Bucket Manager"
-    APP_SLUG = "bucket-manager"
-    CLIENT_ID = os.environ.get("OIDC_CLIENT_ID", "bucket-manager")
+    APP_SLUG = "bucket-explorer"
+    CLIENT_ID = os.environ.get("OIDC_CLIENT_ID", "bucket-explorer")
     CLIENT_SECRET = os.environ.get("OIDC_CLIENT_SECRET", "")
     if not CLIENT_SECRET:
         print("Error: OIDC_CLIENT_SECRET is required")

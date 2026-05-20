@@ -36,8 +36,9 @@ COPY . .
 RUN npm run build
 # Output: /app/dist/ (Vite's default output directory)
 
-# Stage 2: Serve with nginx
+# Stage 2: Serve with nginx (final image — LABEL goes here, not in the builder stage)
 FROM nginx:alpine
+LABEL org.opencontainers.image.source=https://github.com/RitAreaSciencePark/s3bucket-manager-app
 # Copy ONLY the compiled static files (not node_modules, not source code)
 COPY --from=builder /app/dist /usr/share/nginx/html
 # Copy our custom nginx.conf (handles /api/ proxying and SPA fallback)

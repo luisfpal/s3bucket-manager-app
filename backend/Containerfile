@@ -2,6 +2,7 @@
 # Startup runs migrate/collectstatic before gunicorn.
 
 FROM python:3.11-slim
+LABEL org.opencontainers.image.source=https://github.com/RitAreaSciencePark/s3bucket-manager-app
 
 # System packages required by psycopg2 build/runtime.
 RUN apt-get update && apt-get install -y \

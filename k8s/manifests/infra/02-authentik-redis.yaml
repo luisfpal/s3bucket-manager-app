@@ -5,7 +5,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: authentik-redis
-  namespace: storage-system
+  namespace: authentik-bucket-explorer
   labels:
     app: authentik-redis
     component: cache
@@ -39,7 +39,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: authentik-redis
-  namespace: storage-system
+  namespace: authentik-bucket-explorer
 spec:
   type: ClusterIP
   selector:

@@ -1,0 +1,851 @@
+#!/bin/bash
+# ==============================================================================
+# app.sh — Application Layer Management (Webapp: Backend + Frontend)
+# ==============================================================================
+#
+# PURPOSE:
+#   Manages the S3 Bucket Manager webapp in the bucket-explorer namespace.
+#   This is the APPLICATION layer — it assumes Authentik is already running
+#   and reachable (deployed by infra.sh or provided externally in production).
+#
+#   The companion script infra.sh manages the Authentik infrastructure layer
+#   (authentik-bucket-explorer namespace) independently.
+#   These two scripts are self-contained and do not call each other.
+#
+# USAGE:
+#   Full webapp deploy:
+#     ./app.sh deploy --env dev --rebuild    # build images, push to GHCR, deploy
+#     ./app.sh deploy --env dev              # deploy only (use existing images)
+#     ./app.sh deploy --env prod             # production deploy with safety checks
+#
+#   Standalone namespace creation (production: namespace pre-created by infra team):
+#     ./app.sh deploy-namespace [--env dev|prod]
+#
+#   Inner-loop rebuilds (no manifest re-apply — just build, push, restart):
+#     ./app.sh backend       # Rebuild + redeploy backend  (~60s)
+#     ./app.sh frontend      # Rebuild + redeploy frontend (~90s)
+#     ./app.sh all           # Rebuild + redeploy both
+#
+#   Operations:
+#     ./app.sh status              # Show pods in bucket-explorer namespace
+#     ./app.sh logs [component]    # Tail backend or frontend logs
+#     ./app.sh access              # SSH tunnel + port-forwards for frontend + Authentik
+#     ./app.sh restart <comp>      # Restart a deployment without rebuild
+#     ./app.sh cleanup             # Delete bucket-explorer namespace + optional image cleanup
+#     ./app.sh dev-db <action>     # Local PostgreSQL via podman (start|stop|destroy|status)
+#
+# WHAT EACH SUBCOMMAND DOES (for manual reference):
+#
+#   deploy:
+#     1. Build and push images to GHCR (if --rebuild)
+#     2. Create bucket-explorer namespace (deploy-namespace)
+#     3. Apply app secrets and backend ConfigMap
+#     4. Apply app secrets (backend-secret) and backend ConfigMap
+#     5. Apply django-postgres; wait for ready
+#     6. Apply backend (init containers wait for postgres + Authentik FQDN); wait for ready
+#     7. Apply frontend; wait for ready
+#     8. Apply CronJob (periodic tenant sync)
+#
+#   deploy-namespace:
+#     Idempotent: kubectl apply 00-namespace.yaml
+#     In production: infra team pre-creates the namespace, then hands it to app devs.
+#     In dev: called automatically by 'deploy'.
+#
+#   backend/frontend/all:
+#     1. podman build -t ghcr.io/luisfpal/bucket-explorer-<component>:latest
+#     2. ghcr_login + podman push (packages are public; K3s pulls without credentials)
+#     3. kubectl rollout restart deployment/<component>  -n bucket-explorer
+#     4. kubectl rollout status (waits; imagePullPolicy: Always fetches new image)
+#
+#   access:
+#     1. Check/establish SSH tunnel to K3s API (port 16443 → 6443)
+#     2. Fetch kubeconfig if missing
+#     3. Start port-forward: :3000 → bucket-explorer/frontend-service:80
+#     4. Start port-forward: :9000 → authentik-bucket-explorer/authentik-service:9000
+#        (Authentik port-forward is needed here because the login flow redirects to it)
+#
+# PREREQUISITES:
+#   - k8s/.env with GHCR_TOKEN (classic PAT, write:packages scope)
+#   - SSH tunnel to K3s API running, or let 'access' set it up
+#   - KUBECONFIG set to /tmp/k3s-tunnel-kubeconfig.yaml (default)
+#   - Environment overlays in k8s/env/<env>/
+#   - Authentik running in authentik-bucket-explorer namespace (deployed by infra.sh)
+#
+# ==============================================================================
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+# Namespace managed by this script
+NAMESPACE="bucket-explorer"
+
+# Authentik namespace — read-only reference for access() port-forward setup.
+# The app script does not manage this namespace.
+INFRA_NAMESPACE="authentik-bucket-explorer"
+
+APP_MANIFESTS_DIR="$SCRIPT_DIR/manifests/app"
+ENV_BASE_DIR="$SCRIPT_DIR/env"
+
+K3S_NODES=("192.168.132.10" "192.168.132.11" "192.168.132.12")
+TUNNEL_SOCK="/tmp/k3s-api-tunnel.sock"
+TUNNEL_KUBECONFIG="/tmp/k3s-tunnel-kubeconfig.yaml"
+
+GHCR_OWNER="luisfpal"
+REGISTRY="ghcr.io/${GHCR_OWNER}"
+BACKEND_IMAGE="${REGISTRY}/bucket-explorer-backend:latest"
+FRONTEND_IMAGE="${REGISTRY}/bucket-explorer-frontend:latest"
+
+# Source local secrets (GHCR_TOKEN for registry auth). k8s/.env is gitignored.
+# See k8s/.env.example for the expected format and token creation instructions.
+[ -f "${SCRIPT_DIR}/.env" ] && source "${SCRIPT_DIR}/.env"
+
+DEPLOY_ENV="${DEPLOY_ENV:-dev}"
+ENV_DIR=""
+APP_SECRETS_FILE=""
+BACKEND_CONFIG_FILE=""
+
+# Local PostgreSQL container for running Django without K3s
+DEV_PG_CONTAINER="dev-postgres"
+DEV_PG_IMAGE="postgres:15-alpine"
+DEV_PG_DB="djangodb"
+DEV_PG_USER="djangouser"
+DEV_PG_PASS="dev-db-password"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+BOLD='\033[1m'
+
+info()    { echo -e "${BLUE}[INFO]${NC} $*"; }
+success() { echo -e "${GREEN}[  OK]${NC} $*"; }
+warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
+error()   { echo -e "${RED}[FAIL]${NC} $*"; }
+fail()    { error "$*"; exit 1; }
+step()    { echo -e "\n${CYAN}${BOLD}━━━ $* ━━━${NC}"; }
+
+# ==============================================================================
+# Rollout helpers
+# ==============================================================================
+
+rollout_with_retry() {
+    # Wait for a deployment rollout, retrying on timeout.
+    # Usage: rollout_with_retry <resource> [timeout] [attempts] [namespace]
+    local resource="$1"
+    local timeout="${2:-120s}"
+    local attempts="${3:-2}"
+    local ns="${4:-$NAMESPACE}"
+    local attempt
+
+    for ((attempt=1; attempt<=attempts; attempt++)); do
+        if kubectl rollout status "$resource" -n "$ns" --timeout="$timeout"; then
+            return 0
+        fi
+        warn "$resource rollout attempt ${attempt}/${attempts} failed (ns=$ns)"
+        if [ "$attempt" -lt "$attempts" ]; then
+            info "Retrying rollout wait for $resource..."
+        fi
+    done
+
+    fail "$resource rollout did not complete after ${attempts} attempts (ns=$ns)"
+}
+
+wait_for_rollout() {
+    local resource="$1"
+    local timeout="${2:-300s}"
+    local attempts="${3:-2}"
+    local ns="${4:-$NAMESPACE}"
+    info "Waiting for $resource (ns=$ns)..."
+    rollout_with_retry "$resource" "$timeout" "$attempts" "$ns"
+    success "$resource is ready"
+}
+
+# ==============================================================================
+# Kubeconfig
+# ==============================================================================
+
+ensure_kubeconfig() {
+    export KUBECONFIG="${KUBECONFIG:-$TUNNEL_KUBECONFIG}"
+    if [ ! -f "$KUBECONFIG" ]; then
+        error "Kubeconfig not found: $KUBECONFIG"
+        echo "  Run: ./app.sh access"
+        exit 1
+    fi
+    if ! kubectl cluster-info &>/dev/null 2>&1; then
+        error "Cannot connect to K3s. SSH tunnel may be down."
+        echo "  Run: ./app.sh access"
+        exit 1
+    fi
+}
+
+# ==============================================================================
+# Environment file selection + production safety gates
+# ==============================================================================
+
+resolve_app_environment_files() {
+    case "$DEPLOY_ENV" in
+        dev|prod) ;;
+        *) fail "Unsupported --env '$DEPLOY_ENV' (expected: dev|prod)" ;;
+    esac
+
+    ENV_DIR="$ENV_BASE_DIR/$DEPLOY_ENV"
+    APP_SECRETS_FILE="$ENV_DIR/app-secrets.yaml"
+    BACKEND_CONFIG_FILE="$ENV_DIR/backend-config.yaml"
+
+    # Local override files (gitignored, contain real credentials)
+    local app_secrets_local="$ENV_DIR/app-secrets.local.yaml"
+    local backend_local="$ENV_DIR/backend-config.local.yaml"
+
+    [ -f "$app_secrets_local" ] && APP_SECRETS_FILE="$app_secrets_local"
+    [ -f "$backend_local" ]     && BACKEND_CONFIG_FILE="$backend_local"
+
+    [ -f "$APP_SECRETS_FILE" ]    || fail "Missing app secrets file: $APP_SECRETS_FILE"
+    [ -f "$BACKEND_CONFIG_FILE" ] || fail "Missing backend config file: $BACKEND_CONFIG_FILE"
+
+    if [[ "$APP_SECRETS_FILE" == *.local.yaml ]] || [[ "$BACKEND_CONFIG_FILE" == *.local.yaml ]]; then
+        info "Using local overrides from $ENV_DIR (*.local.*)"
+    fi
+}
+
+run_production_safety_checks() {
+    if [ "$DEPLOY_ENV" != "prod" ]; then
+        return 0
+    fi
+
+    grep -q "REPLACE_WITH_PROD_" "$APP_SECRETS_FILE"    && fail "Prod app-secrets still has placeholders: $APP_SECRETS_FILE"
+    grep -q "REPLACE_WITH_PROD_" "$BACKEND_CONFIG_FILE" && fail "Prod config still has placeholders: $BACKEND_CONFIG_FILE"
+
+    grep -q 'DJANGO_DEBUG: "True"' "$BACKEND_CONFIG_FILE"                 && fail "Prod config has DJANGO_DEBUG=True"
+    grep -q 'DJANGO_ALLOWED_HOSTS: "\*"' "$BACKEND_CONFIG_FILE"           && fail "Prod config has wildcard DJANGO_ALLOWED_HOSTS"
+    grep -q 'S3_VERIFY_SSL: "False"' "$BACKEND_CONFIG_FILE"               && fail "Prod config has S3_VERIFY_SSL=False"
+    grep -q 'AUTHENTIK_EXTERNAL_URL: "http://localhost:9000"' "$BACKEND_CONFIG_FILE" && \
+        fail "Prod config uses localhost Authentik URL"
+    if [ -n "${PUBLIC_APP_URL:-}" ] && [[ "$PUBLIC_APP_URL" == *"localhost"* ]]; then
+        fail "PUBLIC_APP_URL points to localhost in prod: $PUBLIC_APP_URL"
+    fi
+}
+
+# ==============================================================================
+# GHCR authentication + pull secret
+# ==============================================================================
+
+ghcr_login() {
+    if [ -z "${GHCR_TOKEN:-}" ]; then
+        fail "GHCR_TOKEN is not set. Add it to k8s/.env — see k8s/.env.example."
+    fi
+    info "Logging in to ghcr.io as ${GHCR_OWNER}..."
+    echo "${GHCR_TOKEN}" | podman login ghcr.io -u "${GHCR_OWNER}" --password-stdin
+    success "Authenticated to ghcr.io"
+}
+
+# ==============================================================================
+# Frontend build helper
+# ==============================================================================
+
+prepare_frontend_generated_dirs() {
+    local frontend_dir="$PROJECT_DIR/frontend"
+    local needs_install=false
+    local needs_build=false
+
+    [ -d "$frontend_dir/node_modules" ] || needs_install=true
+    [ -d "$frontend_dir/dist" ] || needs_build=true
+
+    if [ "$needs_install" = false ] && [ "$needs_build" = false ]; then
+        return 0
+    fi
+
+    if ! command -v npm &>/dev/null; then
+        warn "npm not found; skipping local frontend bootstrap (container build will still generate artifacts)."
+        return 0
+    fi
+
+    step "Bootstrapping missing frontend generated directories"
+    (
+        cd "$frontend_dir"
+        if [ "$needs_install" = true ]; then
+            info "Creating frontend/node_modules via npm ci"
+            npm ci
+        fi
+        if [ "$needs_build" = true ]; then
+            info "Creating frontend/dist via npm run build"
+            npm run build
+        fi
+    )
+    success "Frontend generated directories are present"
+}
+
+# ==============================================================================
+# Namespace deployment (standalone step)
+# ==============================================================================
+
+deploy_namespace() {
+    # Create the bucket-explorer namespace only.
+    #
+    # In production: the infrastructure team runs this step before handing the
+    # namespace to the application team (kubectl apply is idempotent — safe to
+    # run even if the namespace already exists).
+    #
+    # In dev: called automatically as the first step of 'deploy'.
+    resolve_app_environment_files
+    ensure_kubeconfig
+    step "Creating app namespace ($NAMESPACE)"
+    kubectl apply -f "$APP_MANIFESTS_DIR/00-namespace.yaml"
+    success "Namespace $NAMESPACE ready"
+}
+
+# ==============================================================================
+# Apply app manifests (full webapp deployment)
+# ==============================================================================
+
+apply_app_manifests_for_env() {
+    step "Deploying webapp (env=$DEPLOY_ENV, ns=$NAMESPACE)"
+
+    # Step 1: namespace (idempotent — safe even if it already exists)
+    kubectl apply -f "$APP_MANIFESTS_DIR/00-namespace.yaml"
+
+    # Step 2: app secrets (backend-secret) and backend ConfigMap
+    # Note: no imagePullSecret needed — GHCR packages are public (no auth required to pull)
+    kubectl apply -f "$APP_SECRETS_FILE"
+    kubectl apply -f "$BACKEND_CONFIG_FILE"
+
+    # Step 3: Django's PostgreSQL database — must be ready before backend init containers run
+    kubectl apply -f "$APP_MANIFESTS_DIR/01-django-postgres.yaml"
+    wait_for_rollout "deployment/django-postgres" "300s" "2" "$NAMESPACE"
+
+    # Step 4: Backend — two init containers run first:
+    #   - wait-for-postgres: polls django-postgres:5432
+    #   - wait-for-authentik: polls authentik-service.authentik-bucket-explorer.svc.cluster.local:9000
+    kubectl apply -f "$APP_MANIFESTS_DIR/02-backend.yaml"
+    wait_for_rollout "deployment/backend" "300s" "2" "$NAMESPACE"
+
+    # Step 5: Frontend — serves the React SPA and proxies /api/* to backend-service:8000
+    kubectl apply -f "$APP_MANIFESTS_DIR/03-frontend.yaml"
+    wait_for_rollout "deployment/frontend" "300s" "2" "$NAMESPACE"
+
+    # Step 6: CronJob — runs every 10 minutes to sync RGWSquared tenant data
+    kubectl apply -f "$APP_MANIFESTS_DIR/04-cronjob.yaml"
+    success "CronJob sync-all-tenants applied"
+
+    success "Webapp manifests applied"
+}
+
+# ==============================================================================
+# deploy: full webapp deployment
+# ==============================================================================
+
+run_deploy() {
+    local rebuild=false
+    local skip_authentik_check=false
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -h|--help)
+                echo "Usage: ./app.sh deploy [--env dev|prod] [--rebuild] [--skip-authentik-check]"
+                echo ""
+                echo "  --rebuild              Build and push images to GHCR before deploying"
+                echo "  --skip-authentik-check Skip the Authentik readiness check"
+                echo "                         Use when Authentik is known to be running externally"
+                return 0
+                ;;
+            --rebuild)
+                rebuild=true
+                ;;
+            --env)
+                [ -z "${2:-}" ] && fail "--env requires an argument: dev|prod"
+                DEPLOY_ENV="$2"; shift
+                ;;
+            --skip-authentik-check)
+                skip_authentik_check=true
+                ;;
+            *) fail "Unknown argument: $1  (run  ./app.sh deploy --help)" ;;
+        esac
+        shift
+    done
+
+    resolve_app_environment_files
+    run_production_safety_checks
+    ensure_kubeconfig
+
+    # Guard: warn if Authentik infra is not found (dev only — only if INFRA_NAMESPACE is set
+    # and accessible). In production, Authentik is external and this check is skipped.
+    if [ "$skip_authentik_check" = false ] && [ -n "${INFRA_NAMESPACE:-}" ]; then
+        if ! kubectl get deployment authentik-server -n "$INFRA_NAMESPACE" &>/dev/null 2>&1; then
+            warn "Authentik not found in '$INFRA_NAMESPACE' — deploy the infra layer first:"
+            warn "  ./infra.sh deploy --env $DEPLOY_ENV"
+            warn "Continuing anyway; Authentik is assumed to be available externally."
+        fi
+    fi
+
+    step "Webapp deploy start (env=$DEPLOY_ENV)"
+
+    if [ "$rebuild" = true ]; then
+        build_component_image backend
+        build_component_image frontend
+    else
+        info "Skipping image rebuild. Use --rebuild to build and push new images."
+    fi
+
+    apply_app_manifests_for_env
+
+    success "Webapp deploy completed (env=$DEPLOY_ENV)"
+}
+
+# ==============================================================================
+# Inner-loop: build + push + restart a single component
+# ==============================================================================
+
+redeploy_component() {
+    local component="$1"  # "backend" or "frontend"
+    local image_name build_dir
+
+    if [ "$component" = "backend" ]; then
+        image_name="$BACKEND_IMAGE"
+        build_dir="$PROJECT_DIR/backend"
+    elif [ "$component" = "frontend" ]; then
+        image_name="$FRONTEND_IMAGE"
+        build_dir="$PROJECT_DIR/frontend"
+    else
+        error "Unknown component: $component  (expected: backend or frontend)"
+        exit 1
+    fi
+
+    local start_time=$(date +%s)
+
+    [ "$component" = "frontend" ] && prepare_frontend_generated_dirs
+
+    # Step 1: Build image locally
+    step "Building $component"
+    podman build -t "$image_name" -f "$build_dir/Containerfile" "$build_dir"
+    success "Image built"
+
+    # Step 2: Push to GHCR (packages are public; K3s pulls without credentials; imagePullPolicy: Always)
+    ghcr_login
+    info "Pushing to GHCR..."
+    podman push "$image_name"
+    success "Image pushed to ghcr.io"
+
+    # Step 3: Restart deployment — Always pull policy fetches the newly pushed image
+    info "Restarting deployment..."
+    kubectl rollout restart "deployment/$component" -n "$NAMESPACE"
+    rollout_with_retry "deployment/$component" "180s" "2" "$NAMESPACE"
+
+    local elapsed=$(( $(date +%s) - start_time ))
+    success "$component redeployed in ${elapsed}s"
+}
+
+build_component_image() {
+    # Build and push a component image without restarting the deployment.
+    # Used by 'deploy --rebuild' to pre-push images before applying manifests.
+    local component="$1"
+    local image_name build_dir
+
+    if [ "$component" = "backend" ]; then
+        image_name="$BACKEND_IMAGE"
+        build_dir="$PROJECT_DIR/backend"
+    elif [ "$component" = "frontend" ]; then
+        image_name="$FRONTEND_IMAGE"
+        build_dir="$PROJECT_DIR/frontend"
+    else
+        fail "Unknown component: $component"
+    fi
+
+    [ "$component" = "frontend" ] && prepare_frontend_generated_dirs
+
+    step "Building $component image"
+    podman build -t "$image_name" -f "$build_dir/Containerfile" "$build_dir"
+    success "$component image built"
+
+    ghcr_login
+    info "Pushing $component image to GHCR..."
+    podman push "$image_name"
+    success "$component image pushed to ghcr.io"
+}
+
+# ==============================================================================
+# Status: show webapp pods
+# ==============================================================================
+
+show_status() {
+    ensure_kubeconfig
+
+    step "Webapp Pods ($NAMESPACE)"
+    kubectl get pods -n "$NAMESPACE" -o wide 2>/dev/null || \
+        warn "Cannot reach K3s or namespace not deployed yet"
+
+    step "Port-Forwards"
+    local pf_frontend pf_authentik
+    pf_frontend=$(ss -tlnp 2>/dev/null | grep ":3000 " || true)
+    pf_authentik=$(ss -tlnp 2>/dev/null | grep ":9000 " || true)
+
+    if [ -n "$pf_frontend" ]; then
+        success "Frontend  :3000 → active"
+    else
+        warn "Frontend  :3000 → NOT running"
+        info "Fix: ./app.sh access"
+    fi
+
+    if [ -n "$pf_authentik" ]; then
+        success "Authentik :9000 → active"
+    else
+        warn "Authentik :9000 → NOT running"
+        info "Fix: ./app.sh access"
+    fi
+
+    step "SSH Tunnel"
+    if [ -S "$TUNNEL_SOCK" ]; then
+        success "K3s API tunnel active ($TUNNEL_SOCK)"
+    else
+        warn "K3s API tunnel NOT running"
+        info "Fix: ./app.sh access"
+    fi
+
+    echo ""
+}
+
+# ==============================================================================
+# Logs: tail backend or frontend logs
+# ==============================================================================
+
+show_logs() {
+    ensure_kubeconfig
+    local component="${1:-backend}"
+
+    case "$component" in
+        backend|frontend)
+            kubectl logs -l "app=$component" -n "$NAMESPACE" --tail=50 -f
+            ;;
+        *)
+            error "Unknown component: $component"
+            echo "  Valid options: backend, frontend"
+            echo "  For Authentik logs use: ./infra.sh logs [authentik-server|authentik-worker]"
+            exit 1
+            ;;
+    esac
+}
+
+# ==============================================================================
+# Access: establish SSH tunnel + port-forwards for the full login flow
+# ==============================================================================
+
+setup_access() {
+    step "Setting up access"
+
+    # 1. SSH tunnel to K3s API
+    if [ -S "$TUNNEL_SOCK" ]; then
+        if ssh -S "$TUNNEL_SOCK" -O check root@dummy &>/dev/null 2>&1; then
+            success "SSH tunnel already running"
+        else
+            warn "Stale tunnel socket — cleaning up"
+            rm -f "$TUNNEL_SOCK"
+        fi
+    fi
+
+    if [ ! -S "$TUNNEL_SOCK" ]; then
+        info "Starting SSH tunnel: localhost:16443 → K3s API (192.168.132.10:6443)..."
+        ssh -fNM -S "$TUNNEL_SOCK" \
+            -L 16443:127.0.0.1:6443 \
+            -o StrictHostKeyChecking=no \
+            -o ExitOnForwardFailure=yes \
+            root@192.168.132.10
+        success "SSH tunnel established"
+    fi
+
+    # 2. Fetch kubeconfig if missing
+    if [ ! -f "$TUNNEL_KUBECONFIG" ]; then
+        info "Fetching kubeconfig..."
+        scp -o StrictHostKeyChecking=no \
+            root@192.168.132.10:/etc/rancher/k3s/k3s.yaml "$TUNNEL_KUBECONFIG" &>/dev/null
+        sed -i 's|server: https://127.0.0.1:6443|server: https://127.0.0.1:16443|' \
+            "$TUNNEL_KUBECONFIG"
+        success "Kubeconfig ready"
+    fi
+
+    export KUBECONFIG="$TUNNEL_KUBECONFIG"
+
+    # 3. Frontend port-forward (bucket-explorer namespace)
+    #    App devs access the webapp through this port.
+    if ! ss -tlnp 2>/dev/null | grep -q ":3000 "; then
+        info "Starting frontend port-forward (:3000 → $NAMESPACE/frontend-service:80)..."
+        nohup kubectl port-forward svc/frontend-service 3000:80 -n "$NAMESPACE" \
+            > /tmp/pf-frontend.log 2>&1 &
+        sleep 1
+        if ss -tlnp 2>/dev/null | grep -q ":3000 "; then
+            success "Frontend :3000 → active"
+        else
+            warn "Frontend port-forward may have failed — check /tmp/pf-frontend.log"
+        fi
+    else
+        success "Frontend :3000 already running"
+    fi
+
+    # 4. Authentik port-forward (dev only — only when INFRA_NAMESPACE is set and accessible).
+    #    Required in dev: the browser follows OAuth2 redirects to localhost:9000 (Authentik).
+    #    In production, Authentik is external and has a real public URL — no port-forward needed.
+    if [ -n "${INFRA_NAMESPACE:-}" ]; then
+        if ! ss -tlnp 2>/dev/null | grep -q ":9000 "; then
+            info "Starting Authentik port-forward (:9000 → $INFRA_NAMESPACE/authentik-service:9000)..."
+            nohup kubectl port-forward svc/authentik-service 9000:9000 -n "$INFRA_NAMESPACE" \
+                > /tmp/pf-authentik.log 2>&1 &
+            sleep 1
+            if ss -tlnp 2>/dev/null | grep -q ":9000 "; then
+                success "Authentik :9000 → active"
+            else
+                warn "Authentik port-forward may have failed — check /tmp/pf-authentik.log"
+            fi
+        else
+            success "Authentik :9000 already running"
+        fi
+    else
+        info "INFRA_NAMESPACE not set — skipping Authentik port-forward (external Authentik assumed)"
+    fi
+
+    echo ""
+    success "Access ready!"
+    echo ""
+    echo -e "  ${BOLD}On your LOCAL machine (if connecting via SSH):${NC}"
+    echo "    ssh -L 3000:localhost:3000 -L 9000:localhost:9000 orfeo-vm"
+    echo ""
+    echo -e "  ${BOLD}Then open:${NC} ${GREEN}http://localhost:3000${NC}"
+    echo ""
+}
+
+# ==============================================================================
+# Restart: restart an app deployment without rebuilding
+# ==============================================================================
+
+restart_component() {
+    local component="$1"
+    ensure_kubeconfig
+
+    case "$component" in
+        backend|frontend|django-postgres)
+            ;;
+        authentik-server|authentik-worker|authentik-postgres|authentik-redis)
+            fail "'$component' is in the infra layer — use: ./infra.sh restart $component"
+            ;;
+        *)
+            warn "Component '$component' may not be in $NAMESPACE — attempting anyway"
+            ;;
+    esac
+
+    info "Restarting $component (ns=$NAMESPACE)..."
+    kubectl rollout restart "deployment/$component" -n "$NAMESPACE"
+    rollout_with_retry "deployment/$component" "180s" "2" "$NAMESPACE"
+    success "$component restarted"
+}
+
+# ==============================================================================
+# Cleanup: delete the webapp namespace + optionally clean images from K3s nodes
+# ==============================================================================
+
+run_cleanup() {
+    ensure_kubeconfig
+
+    echo ""
+    echo -e "${BOLD}Webapp — Cleanup${NC}"
+    echo ""
+
+    info "Deleting namespace '$NAMESPACE' and all its resources..."
+    kubectl delete namespace "$NAMESPACE" --ignore-not-found --timeout=60s 2>/dev/null || true
+    success "Namespace $NAMESPACE deleted"
+
+    read -p "Remove webapp container images from K3s nodes? [y/N] " -n 1 -r
+    echo ""
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        for node in "${K3S_NODES[@]}"; do
+            info "Removing images from $node..."
+            ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "root@${node}" \
+                "k3s ctr images rm ${BACKEND_IMAGE} ${FRONTEND_IMAGE}" \
+                2>/dev/null || warn "Could not clean images on $node"
+        done
+        success "Images cleaned from all nodes"
+    fi
+
+    echo ""
+    success "Webapp cleanup complete!"
+    echo ""
+    echo "  To verify:  kubectl get all -n $NAMESPACE"
+    echo "  To redeploy: ./app.sh deploy --env dev --rebuild"
+    echo ""
+}
+
+# ==============================================================================
+# dev-db: Local PostgreSQL via podman (for running Django without K3s)
+#
+# Starts a postgres:15-alpine container with credentials that match
+# manifests/app/01-django-postgres.yaml so that Django's settings.py picks up
+# PostgreSQL instead of falling back to SQLite.
+#
+# Workflow:
+#   ./app.sh dev-db start
+#   export DATABASE_HOST=localhost DATABASE_NAME=djangodb \
+#          DATABASE_USER=djangouser DATABASE_PASSWORD=dev-db-password
+#   cd ../backend && python manage.py migrate && python manage.py runserver
+#
+# ==============================================================================
+
+dev_db() {
+    local action="${1:-help}"
+    case "$action" in
+        start)
+            if podman inspect "$DEV_PG_CONTAINER" &>/dev/null; then
+                local state
+                state=$(podman inspect --format '{{.State.Status}}' "$DEV_PG_CONTAINER")
+                if [ "$state" = "running" ]; then
+                    info "dev-postgres is already running on localhost:5432"
+                else
+                    info "Starting existing dev-postgres container..."
+                    podman start "$DEV_PG_CONTAINER"
+                fi
+            else
+                info "Creating and starting dev-postgres container..."
+                podman run -d \
+                    --name "$DEV_PG_CONTAINER" \
+                    -e POSTGRES_DB="$DEV_PG_DB" \
+                    -e POSTGRES_USER="$DEV_PG_USER" \
+                    -e POSTGRES_PASSWORD="$DEV_PG_PASS" \
+                    -p 5432:5432 \
+                    "$DEV_PG_IMAGE"
+            fi
+            echo ""
+            success "PostgreSQL is running. Export these vars then use Django normally:"
+            echo ""
+            echo "  export DATABASE_HOST=localhost"
+            echo "  export DATABASE_NAME=$DEV_PG_DB"
+            echo "  export DATABASE_USER=$DEV_PG_USER"
+            echo "  export DATABASE_PASSWORD=$DEV_PG_PASS"
+            echo ""
+            echo "  cd ../backend"
+            echo "  python manage.py migrate"
+            echo "  python manage.py runserver"
+            echo ""
+            ;;
+        stop)
+            info "Stopping dev-postgres..."
+            podman stop "$DEV_PG_CONTAINER" && success "Stopped"
+            ;;
+        destroy)
+            info "Removing dev-postgres container and all data..."
+            podman rm -f "$DEV_PG_CONTAINER" && success "Removed"
+            ;;
+        status)
+            if podman inspect "$DEV_PG_CONTAINER" &>/dev/null; then
+                local state
+                state=$(podman inspect --format '{{.State.Status}}' "$DEV_PG_CONTAINER")
+                info "dev-postgres: $state"
+            else
+                info "dev-postgres: not created"
+            fi
+            ;;
+        *)
+            echo "  Usage: ./app.sh dev-db <start|stop|destroy|status>"
+            echo ""
+            echo "  start    Create and start local PostgreSQL (localhost:5432)"
+            echo "  stop     Stop the container (data preserved)"
+            echo "  destroy  Remove container and all data"
+            echo "  status   Show container state"
+            ;;
+    esac
+}
+
+# ==============================================================================
+# Main
+# ==============================================================================
+
+usage() {
+    echo -e "${BOLD}app.sh — Webapp Management (bucket-explorer namespace)${NC}"
+    echo ""
+    echo "  Usage: ./app.sh <command> [args]"
+    echo ""
+    echo "  Deployment:"
+    echo "    deploy [--env dev|prod] [--rebuild] [--skip-authentik-check]"
+    echo "                   Full webapp deploy (namespace → secrets → postgres → backend → frontend → cronjob)"
+    echo "    deploy-namespace [--env dev|prod]"
+    echo "                   Create bucket-explorer namespace only (production pre-step)"
+    echo ""
+    echo "  Inner-loop rebuilds (no manifest re-apply):"
+    echo "    backend        Rebuild + push backend image → GHCR; restart deployment (~60s)"
+    echo "    frontend       Rebuild + push frontend image → GHCR; restart deployment (~90s)"
+    echo "    all            Rebuild + push both; restart both deployments"
+    echo ""
+    echo "  Operations:"
+    echo "    status         Show pods in $NAMESPACE namespace"
+    echo "    logs [comp]    Tail logs (backend, frontend)"
+    echo "    access         SSH tunnel + port-forwards for frontend (:3000) and Authentik (:9000)"
+    echo "    restart <comp> Restart a deployment without rebuild"
+    echo "    cleanup        Delete $NAMESPACE namespace + optionally clean images from K3s nodes"
+    echo "    dev-db <act>   Local PostgreSQL via podman (start|stop|destroy|status)"
+    echo ""
+    echo "  Namespace  : $NAMESPACE"
+    echo "  Images     : $BACKEND_IMAGE"
+    echo "               $FRONTEND_IMAGE"
+    echo ""
+    echo "  Environment overlays:"
+    echo "    k8s/env/{dev,prod}/app-secrets.yaml      — backend-secret"
+    echo "    k8s/env/{dev,prod}/backend-config.yaml   — backend ConfigMap"
+    echo "    Optional local overrides (gitignored)    : *.local.yaml"
+    echo ""
+    echo "  Companion script: ./infra.sh  (manages Authentik in $INFRA_NAMESPACE)"
+    echo ""
+}
+
+COMMAND="${1:-}"
+shift || true
+
+case "$COMMAND" in
+    deploy)
+        run_deploy "$@"
+        ;;
+    deploy-namespace)
+        # Parse optional --env flag before calling deploy_namespace
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --env) [ -z "${2:-}" ] && fail "--env requires: dev|prod"; DEPLOY_ENV="$2"; shift ;;
+                *) fail "Unknown argument: $1" ;;
+            esac
+            shift
+        done
+        deploy_namespace
+        ;;
+    backend)
+        ensure_kubeconfig
+        redeploy_component backend
+        ;;
+    frontend)
+        ensure_kubeconfig
+        redeploy_component frontend
+        ;;
+    all)
+        ensure_kubeconfig
+        redeploy_component backend
+        redeploy_component frontend
+        ;;
+    status)
+        show_status
+        ;;
+    logs)
+        show_logs "${1:-backend}"
+        ;;
+    access)
+        setup_access
+        ;;
+    restart)
+        [ -z "${1:-}" ] && fail "Usage: ./app.sh restart <component>"
+        restart_component "$1"
+        ;;
+    cleanup)
+        run_cleanup
+        ;;
+    dev-db)
+        dev_db "${1:-help}"
+        ;;
+    *)
+        usage
+        exit 1
+        ;;
+esac

@@ -5,7 +5,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: django-postgres-pvc
-  namespace: storage-system
+  namespace: bucket-explorer
 spec:
   accessModes:
     - ReadWriteOnce
@@ -18,7 +18,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: django-postgres
-  namespace: storage-system
+  namespace: bucket-explorer
   labels:
     app: django-postgres
     component: database
@@ -77,7 +77,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: django-postgres
-  namespace: storage-system
+  namespace: bucket-explorer
 spec:
   type: ClusterIP
   selector:

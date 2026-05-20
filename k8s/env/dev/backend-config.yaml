@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: backend-config
-  namespace: storage-system
+  namespace: bucket-explorer
 data:
   DJANGO_DEBUG: "True"
   DJANGO_ALLOWED_HOSTS: "*"
@@ -17,10 +17,11 @@ data:
   S3_ENDPOINT: "REPLACE_WITH_DEV_S3_ENDPOINT"
   S3_USE_SSL: "True"
   S3_VERIFY_SSL: "False"
-  S3_REGION: "us-east-1"
+  S3_REGION: "eu-south-1"
 
-  AUTHENTIK_URL: "http://authentik-service:9000"
+  AUTHENTIK_URL: "http://authentik-service.authentik-bucket-explorer.svc.cluster.local:9000"
   AUTHENTIK_EXTERNAL_URL: "http://localhost:9000"
-  OIDC_CLIENT_ID: "bucket-manager"
+  OIDC_CLIENT_ID: "REPLACE_WITH_DEV_OIDC_CLIENT_ID"
 
   RGWSQUARED_URL: "REPLACE_WITH_DEV_RGWSQUARED_URL"
+  OIDC_APPLICATION_SLUG: "REPLACE_WITH_DEV_OIDC_APPLICATION_SLUG"
