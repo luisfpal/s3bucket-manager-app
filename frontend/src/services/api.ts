@@ -1,5 +1,5 @@
 /**
- * API Service — Multi-tenant S3 Bucket Manager
+ * API Service — Multi-tenant Bucket Explorer
  *
  * All requests include X-Tenant-ID header when a tenant is active.
  * baseURL = '/api' — nginx proxies to Django backend.
@@ -10,7 +10,8 @@ import type {
   User, TokenExchangeResponse, Bucket, BucketDetail, TenantInfo, BucketShare,
   BucketAccessList,
   AdminPermission, AdminBucket, AdminUser, AdminTenant, AdminGroupMapping,
-  AdminUOMapping, AdminAvailableTenant, NexusDetectResponse,
+  AdminTenantActivation, AdminUOMapping, AdminAvailableTenant, CreateTenantPayload, NexusDetectResponse,
+  AdminUserFile, FileNameRule, FileDeviation, TenantDocument, FileFormatsResponse,
 } from '../types';
 
 interface FileBlobOptions {
@@ -110,36 +111,80 @@ export function getApiError(err: unknown, fallback = 'Something went wrong'): st
 }
 
 export const authAPI = {
+  /**
+   * Exchange the OAuth2 session cookie for JWT access + refresh tokens.
+   *
+   * Called once from AuthCallback after OIDC flow completes. The server-side
+   * session is destroyed after handoff — subsequent requests use JWT, not cookies.
+   * @returns JWT tokens, user profile, and all tenant memberships.
+   */
   exchangeToken: async (): Promise<TokenExchangeResponse> => {
     const response = await api.get('/auth/token/');
     return response.data;
   },
 
-  getCurrentUser: async (): Promise<User> => {
-    const response = await api.get('/auth/user/');
+  /**
+   * Fetch the authenticated user's current profile and live tenant memberships.
+   *
+   * Called on every page mount (Dashboard, BucketDetail, Profile). The response
+   * includes each tenant's document visibility — used by Navbar to show/hide the
+   * tenant documentation tab without a separate API call.
+   * @param opts.signal - Optional AbortSignal to cancel stale requests on navigation.
+   */
+  getCurrentUser: async (opts: { signal?: AbortSignal } = {}): Promise<User> => {
+    const response = await api.get('/auth/user/', { signal: opts.signal });
     return response.data;
   },
 
+  /**
+   * Fetch the active tenant's markdown documentation (if visible to users).
+   *
+   * Returns 404 when no document exists or when the admin has hidden it.
+   * The Navbar tab is only shown when this succeeds.
+   */
+  getTenantDocument: async (): Promise<{ tab_name: string; content: string; updated_at: string }> => {
+    const response = await api.get('/auth/tenant-document/');
+    return response.data;
+  },
+
+  /**
+   * Set the active tenant for the current session.
+   *
+   * Multi-tenant users must call this after login. The returned tenant ID is stored
+   * in localStorage and sent as `X-Tenant-ID` on all subsequent bucket requests.
+   */
   selectTenant: async (tenantId: number): Promise<{ active_tenant: TenantInfo }> => {
     const response = await api.post('/auth/select-tenant/', { tenant_id: tenantId });
     return response.data;
   },
 
+  /** Clear JWT tokens and active tenant from storage — effectively logs out. */
   logout: () => {
     authTokenStore.clear();
     localStorage.removeItem('active_tenant_id');
     localStorage.removeItem('active_tenant');
   },
 
+  /** Redirect to Authentik OIDC login — initiates the full OAuth2 flow. */
   startLogin: () => {
+    authTokenStore.clear();
+    localStorage.removeItem('active_tenant_id');
+    localStorage.removeItem('active_tenant');
     window.location.href = '/api/oauth/login/authentik/';
   },
 
+  /**
+   * Read the active tenant from localStorage (synchronous, no network call).
+   *
+   * Written by `setActiveTenant` at login or tenant selection. Contains the
+   * `document` field used by Navbar to decide whether to show the doc tab.
+   */
   getActiveTenant: (): TenantInfo | null => {
     const stored = localStorage.getItem('active_tenant');
     return stored ? JSON.parse(stored) : null;
   },
 
+  /** Persist the active tenant to localStorage for X-Tenant-ID header injection. */
   setActiveTenant: (tenant: TenantInfo) => {
     localStorage.setItem('active_tenant_id', String(tenant.id));
     localStorage.setItem('active_tenant', JSON.stringify(tenant));
@@ -147,18 +192,31 @@ export const authAPI = {
 };
 
 export const bucketAPI = {
+  /**
+   * List all buckets the user can access in the active tenant.
+   *
+   * Requires `X-Tenant-ID` header (injected automatically from localStorage).
+   * Returns both proposal (RGWSquared-synced) and local (user-created) buckets
+   * with S3 storage stats.
+   */
   list: async (): Promise<Bucket[]> => {
     const response = await api.get('/buckets/');
     return response.data;
   },
 
+  /**
+   * Create a local research bucket in the active tenant.
+   *
+   * The backend generates the internal S3 bucket name from the active account.
+   * Only `name` (the project ID/display bucket name) is provided by the user.
+   */
   create: async (name: string, description?: string): Promise<Bucket> => {
     const response = await api.post('/buckets/', { name, description: description || '' });
     return response.data;
   },
 
-  get: async (id: number): Promise<BucketDetail> => {
-    const response = await api.get(`/buckets/${id}/`);
+  get: async (id: number, opts: { signal?: AbortSignal } = {}): Promise<BucketDetail> => {
+    const response = await api.get(`/buckets/${id}/`, { signal: opts.signal });
     return response.data;
   },
 
@@ -194,8 +252,8 @@ export const bucketAPI = {
     window.URL.revokeObjectURL(url);
   },
 
-  getAccessList: async (bucketId: number): Promise<BucketAccessList> => {
-    const response = await api.get(`/buckets/${bucketId}/access-list/`);
+  getAccessList: async (bucketId: number, opts: { signal?: AbortSignal } = {}): Promise<BucketAccessList> => {
+    const response = await api.get(`/buckets/${bucketId}/access-list/`, { signal: opts.signal });
     return response.data;
   },
 
@@ -222,7 +280,7 @@ export const bucketAPI = {
     return ['.nxs', '.nx5', '.h5', '.hdf5', '.hdf', '.nexus', '.nxspe'].some(ext => lower.endsWith(ext));
   },
 
-  isViewableFile: (fileKey: string): 'image' | 'text' | 'pdf' | 'csv' | 'html' | 'markdown' | null => {
+  isViewableFile: (fileKey: string): 'image' | 'text' | 'pdf' | 'csv' | 'html' | 'markdown' | 'docx' | null => {
     const ext = fileKey.toLowerCase().split('.').pop() || '';
     if (['png', 'jpg', 'jpeg', 'gif', 'svg', 'bmp', 'webp', 'tiff', 'tif'].includes(ext)) return 'image';
     if (ext === 'csv') return 'csv';
@@ -230,6 +288,7 @@ export const bucketAPI = {
     if (ext === 'md') return 'markdown';
     if (['txt', 'json', 'xml', 'yaml', 'yml', 'log', 'py', 'js', 'ts', 'sh', 'conf', 'ini', 'cfg', 'toml', 'env', 'css'].includes(ext)) return 'text';
     if (ext === 'pdf') return 'pdf';
+    if (ext === 'docx') return 'docx';
     return null;
   },
 
@@ -325,31 +384,28 @@ export const adminAPI = {
     return response.data;
   },
 
-  deleteBucket: async (id: number): Promise<void> => {
-    await adminAxios.delete(`/buckets/${id}/`);
+  deleteBucket: async (id: number, force = false): Promise<void> => {
+    const url = force ? `/buckets/${id}/?force=true` : `/buckets/${id}/`;
+    await adminAxios.delete(url);
   },
 
   deleteFile: async (bucketId: number, fileKey: string): Promise<void> => {
     await adminAxios.delete(`/buckets/${bucketId}/files/${fileKey}/`);
   },
 
-  getUsers: async (): Promise<AdminUser[]> => {
-    const response = await adminAxios.get('/users/');
+  getUsers: async (tenantCode?: string): Promise<AdminUser[]> => {
+    const url = tenantCode ? `/users/?tenant_code=${encodeURIComponent(tenantCode)}` : '/users/';
+    const response = await adminAxios.get(url);
     return response.data;
   },
 
-  getTenants: async (): Promise<AdminTenant[]> => {
-    const response = await adminAxios.get('/tenants/');
+  getTenantActivation: async (): Promise<AdminTenantActivation[]> => {
+    const response = await adminAxios.get('/tenant-activation/');
     return response.data;
   },
 
-  getGroupMappings: async (): Promise<AdminGroupMapping[]> => {
-    const response = await adminAxios.get('/group-mappings/');
-    return response.data;
-  },
-
-  addGroupMapping: async (authentik_group: string, tenant_id: number): Promise<AdminGroupMapping> => {
-    const response = await adminAxios.post('/group-mappings/', { authentik_group, tenant_id });
+  addGroupMapping: async (authentik_group: string, tenant_id: number, role: 'rw' | 'ro' = 'rw'): Promise<AdminGroupMapping> => {
+    const response = await adminAxios.post('/group-mappings/', { authentik_group, tenant_id, role });
     return response.data;
   },
 
@@ -359,6 +415,11 @@ export const adminAPI = {
 
   getAvailableTenants: async (): Promise<AdminAvailableTenant[]> => {
     const response = await adminAxios.get('/available-tenants/');
+    return response.data;
+  },
+
+  createTenant: async (payload: CreateTenantPayload): Promise<AdminTenant> => {
+    const response = await adminAxios.post('/tenants/create/', payload);
     return response.data;
   },
 
@@ -388,6 +449,52 @@ export const adminAPI = {
       structure,
       update_from_ext: updateFromExt,
     }, { timeout: 120000 });
+    return response.data;
+  },
+
+  getMembershipFiles: async (membershipId: number): Promise<AdminUserFile[]> => {
+    const response = await adminAxios.get(`/memberships/${membershipId}/files/`);
+    return response.data;
+  },
+
+  getFileNameRules: async (tenantCode?: string): Promise<FileNameRule[]> => {
+    const url = tenantCode ? `/file-name-rules/?tenant_code=${tenantCode}` : '/file-name-rules/';
+    const response = await adminAxios.get(url);
+    return response.data;
+  },
+
+  addFileNameRule: async (tenant_code: string, substring: string): Promise<FileNameRule> => {
+    const response = await adminAxios.post('/file-name-rules/', { tenant_code, substring });
+    return response.data;
+  },
+
+  deleteFileNameRule: async (id: number): Promise<void> => {
+    await adminAxios.delete(`/file-name-rules/${id}/`);
+  },
+
+  getFileDeviations: async (tenantCode: string): Promise<{ no_rules: boolean; deviations: FileDeviation[] }> => {
+    const response = await adminAxios.get(`/file-deviations/?tenant_code=${tenantCode}`);
+    return response.data;
+  },
+
+  getTenantDocument: async (tenantCode: string): Promise<TenantDocument> => {
+    const response = await adminAxios.get(`/tenant-documents/${tenantCode}/`);
+    return response.data;
+  },
+
+  saveTenantDocument: async (tenantCode: string, payload: FormData): Promise<TenantDocument> => {
+    const response = await adminAxios.post(`/tenant-documents/${tenantCode}/`, payload, {
+      headers: { 'Content-Type': undefined as unknown as string },
+    });
+    return response.data;
+  },
+
+  deleteTenantDocument: async (tenantCode: string): Promise<void> => {
+    await adminAxios.delete(`/tenant-documents/${tenantCode}/`);
+  },
+
+  getFileFormats: async (tenantCode: string): Promise<FileFormatsResponse> => {
+    const response = await adminAxios.get(`/file-formats/?tenant_code=${tenantCode}`);
     return response.data;
   },
 };

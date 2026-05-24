@@ -1,4 +1,4 @@
-# S3 Bucket Manager
+# Bucket Explorer
 
 A web application for managing S3 buckets on **Ceph RADOS Gateway (RGW)**, deployed on **Kubernetes (K3s)**. Built with Django REST Framework, React, nginx, PostgreSQL, Authentik OAuth2/OIDC, and the RGWSquared integration used by the storage platform.
 
@@ -90,9 +90,18 @@ In this application, RGWSquared is the source of truth for project bucket permis
 
 RGWSquared is currently private because it is tightly coupled to ORFEO-specific infrastructure and collaboration workflows. The integration in this repository should therefore be treated as a deployment dependency and boundary, not as a complete public specification of the microservice. A future deployment could replace RGWSquared by implementing the same essential pipeline: map collaboration/project state to users, buckets, and Ceph RGW access policies.
 
+## Further Documentation
+
+- [RGWSquared API guide](docs/rgwsquared-api.md) documents the stable webapp-facing RGWSquared calls with sanitized curl examples.
+- [Maintainer guide](docs/bucket-explorer-maintainer-guide.md) explains tenant routing, identity fields, bucket naming, file naming, admin workflows, and the Django data model.
+- [Database schema](docs/database-schema.html) is a standalone visual ERD for the current Django models; [PDF export](docs/database-schema.pdf) is included for review and sharing.
+- [API documentation guide](docs/api-documentation.md) explains the drf-spectacular / Swagger UI setup and how to access interactive API docs in development and production.
+- [Development environment overview](docs/dev-environment-overview.md) describes the Stencil virtual datacenter used for development and how the application fits into it.
+- [Development environment setup](docs/dev-environment-setup.md) is a step-by-step guide for reproducing the development environment from scratch.
+
 ## Infrastructure Context
 
-This project was developed and validated in a Stencil virtual datacenter: a virtualized multi-node environment used during the internship to approximate production infrastructure without requiring dedicated physical servers. Stencil runs real datacenter software inside VMs, including a K3s Kubernetes cluster, Ceph RGW for S3-compatible object storage, and supporting identity/networking services.
+This project was developed and validated in the **[Stencil](https://gitlab.com/area7/datacenter/codes/stencil/docs/-/tree/main/docs) virtual datacenter**: a virtualized multi-node environment developed by AREA Science Park to approximate production infrastructure on a single physical machine. Stencil runs real datacenter software inside KVM virtual machines — a K3s Kubernetes cluster, a Ceph distributed storage cluster with S3-compatible RGW, FreeIPA for DNS and identity, and supporting networking services. Credit for the Stencil infrastructure goes to the AREA Science Park team.
 
 The application is therefore designed around production-like boundaries: containers are built and pushed to a registry, Kubernetes pulls those images onto cluster nodes, Django stores application state in PostgreSQL, and object data lives outside the app namespace in Ceph RGW. Concrete hostnames, IP addresses, credentials, and local tunnel details are environment-specific and should be supplied through `k8s/env/<env>/` templates or ignored local overrides.
 
@@ -172,17 +181,17 @@ kubectl port-forward -n authentik-bucket-explorer svc/authentik-service 9000:900
 **Step 2 — If the deployment host is remote, create SSH local forwards from your workstation:**
 
 ```bash
-ssh -L 3000:localhost:3000 -L 9000:localhost:9000 <deployment-host>
+ssh -L 3000:127.0.0.1:3000 -L <auth-local-port>:127.0.0.1:<auth-service-port> <deployment-host>
 ```
 
 **Step 3 — Open browser:**
 
 | URL                       | What            |
 | ------------------------- | --------------- |
-| `http://localhost:3000` | The app         |
-| `http://localhost:9000` | Authentik admin |
+| `http://localhost:3000` | The app |
+| Authentik admin local URL | Authentik admin |
 
-**Authentik admin password:** stored in Kubernetes secret `authentik-secret.bootstrap-password` (set in `k8s/env/<env>/infra-secrets.local.yaml`).
+**Authentik admin credential:** stored in the Authentik Kubernetes Secret configured by the selected environment overlay.
 
 ### Cleanup
 
@@ -233,10 +242,10 @@ kubectl apply -f manifests/app/02-backend.yaml
 
 ```bash
 # 1. Build container image
-podman build -t ghcr.io/luisfpal/bucket-explorer-backend:latest -f backend/Containerfile backend/
+podman build -t ghcr.io/luisfpal/buckets-explorer-backend:latest -f backend/Containerfile backend/
 
 # 2. Push to the configured registry
-podman push ghcr.io/luisfpal/bucket-explorer-backend:latest
+podman push ghcr.io/luisfpal/buckets-explorer-backend:latest
 
 # 3. Restart the deployment (picks up new image)
 kubectl rollout restart deployment/backend -n bucket-explorer
@@ -262,7 +271,7 @@ cd k8s
 
 ```bash
 # Re-establish SSH local forwards when the deployment host is remote
-ssh -L 3000:localhost:3000 -L 9000:localhost:9000 <deployment-host>
+ssh -L 3000:127.0.0.1:3000 -L <auth-local-port>:127.0.0.1:<auth-service-port> <deployment-host>
 ```
 
 Then open `http://localhost:3000`.
@@ -343,7 +352,7 @@ Development Ceph RGW deployments may use self-signed TLS certificates. Productio
 
 ## Operations Notes
 
-The public repository documents the portable deployment shape. Environment-specific hostnames, IP addresses, tunnel sockets, dashboard passwords, and break-glass Ceph procedures belong in the operator runbook for the target infrastructure.
+The public repository documents the portable deployment shape. Environment-specific hostnames, IP addresses, tunnel sockets, dashboard credentials, and break-glass Ceph procedures belong in the operator runbook for the target infrastructure.
 
 For a normal development or staging deployment, start with the app/infra scripts:
 
@@ -398,12 +407,12 @@ The Stencil validation environment used a virtualized multi-node topology:
 
 Use Kubernetes Secrets only. No literal credentials should be documented in this repository.
 
-| Service                   | Secret Source                                                                   |
-| ------------------------- | ------------------------------------------------------------------------------- |
-| Authentik admin bootstrap | `authentik-secret.bootstrap-password`                                         |
-| OIDC client secret        | `backend-secret.oidc-client-secret`                                           |
-| RGWSquared credentials    | `backend-secret.rgwsquared-username` / `backend-secret.rgwsquared-password` |
-| Django DB password        | `backend-secret.database-password`                                            |
+| Service                    | Secret Source                 |
+| -------------------------- | ----------------------------- |
+| Authentik admin bootstrap  | Authentik Kubernetes Secret   |
+| OIDC client credential     | Backend Kubernetes Secret     |
+| RGWSquared credentials     | Backend Kubernetes Secret     |
+| Django database credential | Backend Kubernetes Secret     |
 
 Set real values in `k8s/env/<env>/*.local.yaml` (gitignored) or your external secret manager.
 

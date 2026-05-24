@@ -1,6 +1,7 @@
-"""Django settings for the S3 Bucket Manager backend."""
+"""Django settings for the Buckets Explorer backend."""
 
 import os
+import sys
 from pathlib import Path
 from datetime import timedelta
 from django.core.exceptions import ImproperlyConfigured
@@ -11,16 +12,19 @@ BASE_DIR = Path(__file__).resolve().parent
 # Security
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-secret-key-change-in-production")
 DEBUG = os.getenv("DJANGO_DEBUG", "False") == "True"
+TESTING = "test" in sys.argv
 ALLOWED_HOSTS = os.getenv("DJANGO_ALLOWED_HOSTS", "localhost").split(",")
+# Trust HAProxy's TLS-termination header so redirect_uri is built with https://.
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
-if not DEBUG and SECRET_KEY == "dev-secret-key-change-in-production":
+if not DEBUG and not TESTING and SECRET_KEY == "dev-secret-key-change-in-production":
     raise ImproperlyConfigured(
         "DJANGO_SECRET_KEY must be set in non-debug environments"
     )
 
 
 def require_non_debug_env(var_name: str, value: str) -> str:
-    if not DEBUG and not value:
+    if not DEBUG and not TESTING and not value:
         raise ImproperlyConfigured(f"{var_name} must be set in non-debug environments")
     return value
 
@@ -38,6 +42,8 @@ INSTALLED_APPS = [
     "rest_framework_simplejwt",
     # OAuth2/Social Auth (for Authentik OIDC)
     "social_django",
+    # API documentation (generates OpenAPI schema at /api/schema/, Swagger UI at /api/docs/)
+    "drf_spectacular",
     # Our application
     "storage",
 ]
@@ -53,6 +59,7 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     # Social auth middleware for OAuth2 state management
     "social_django.middleware.SocialAuthExceptionMiddleware",
+    "storage.middleware.OAuthExceptionRedirectMiddleware",
 ]
 
 ROOT_URLCONF = "urls"
@@ -144,6 +151,47 @@ REST_FRAMEWORK = {
         "rest_framework.parsers.MultiPartParser",
         "rest_framework.parsers.FormParser",
     ),
+    "DEFAULT_THROTTLE_RATES": {
+        "admin_login": os.getenv("ADMIN_LOGIN_THROTTLE_RATE", "5/min"),
+    },
+    # Tell drf-spectacular to use the AutoSchema class for generating OpenAPI descriptions.
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+}
+
+# API documentation — drf-spectacular
+# Generates a machine-readable OpenAPI 3.0 schema and serves interactive Swagger UI.
+# Audience: developers and maintainers of this codebase.
+SPECTACULAR_SETTINGS = {
+    "TITLE": "Buckets Explorer API",
+    "DESCRIPTION": (
+        "S3 object storage management API for multi-tenant research facilities.\n\n"
+        "## Authentication\n"
+        "1. Initiate OAuth2 login: `GET /api/oauth/login/authentik/`\n"
+        "2. After OIDC callback: `GET /api/auth/token/` → returns `access` + `refresh` JWT tokens\n"
+        "3. Include `Authorization: Bearer <access>` on all subsequent requests\n\n"
+        "## Tenant scoping\n"
+        "All bucket endpoints require an `X-Tenant-ID` header with the active tenant ID.\n"
+        "Obtain the tenant ID from the `tenants` array in the `/auth/token/` response.\n\n"
+        "## Admin endpoints\n"
+        "Admin endpoints (`/api/admin/*`) use a separate JWT obtained from `POST /api/admin/login/`.\n"
+        "The admin user is the Django superuser (`DJANGO_SUPERUSER_USERNAME`)."
+    ),
+    "VERSION": "1.0.0",
+    "SERVE_INCLUDE_SCHEMA": False,
+    # Split request/response schemas for cleaner documentation.
+    "COMPONENT_SPLIT_REQUEST": True,
+    # Strip the /api/ prefix from schema path prefixes for cleaner display.
+    "SCHEMA_PATH_PREFIX": "/api/",
+    # Access control for the schema and docs endpoints:
+    # - DEV (DEBUG=True): open access — any visitor can read the schema
+    # - PROD (DEBUG=False): restricted to is_staff users (Django superuser only)
+    #   This prevents the full endpoint map from being public attack-surface intelligence.
+    #   Access: POST /api/admin/login/ → get JWT → use "Authorize" button in Swagger UI.
+    "SERVE_PERMISSIONS": (
+        ["rest_framework.permissions.AllowAny"]
+        if DEBUG
+        else ["rest_framework.permissions.IsAdminUser"]
+    ),
 }
 
 # JWT
@@ -194,6 +242,7 @@ SOCIAL_AUTH_AUTHENTIK_AUTH_EXTRA_ARGUMENTS = {}
 LOGIN_REDIRECT_URL = "/auth/callback"
 LOGOUT_REDIRECT_URL = "/"
 LOGIN_URL = "/api/oauth/login/authentik/"
+SOCIAL_AUTH_LOGIN_ERROR_URL = "/login?auth_error=oauth_forbidden"
 
 # User provisioning pipeline
 SOCIAL_AUTH_PIPELINE = (
@@ -220,7 +269,7 @@ SOCIAL_AUTH_AUTHENTIK_USER_FIELDS = ["email", "username", "external_id", "idp_so
 # Session configuration (OAuth2 handshake only)
 
 SESSION_ENGINE = "django.contrib.sessions.backends.db"
-SESSION_COOKIE_NAME = "bucket_manager_oauth_session"
+SESSION_COOKIE_NAME = "bucket_explorer_oauth_session"
 SESSION_COOKIE_AGE = 300  # 5 minutes - only needed during OAuth2 handshake
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = "Lax"

@@ -1,12 +1,14 @@
+import { useAutoError } from '../../hooks/useAutoMessage'
 import { useState, useEffect, Fragment } from 'react'
 import { adminAPI, getApiError } from '../../services/api'
 import { formatDate, formatSize } from '../../utils/format'
 import type { AdminBucket, AdminPermission } from '../../types'
 
-type SortField = 'size_bytes' | 'num_objects' | 'shares_count' | 'created_at' | null
+type SortField = 'name' | 'size_bytes' | 'num_objects' | 'shares_count' | 'created_at' | null
 type SortDir = 'asc' | 'desc'
 
 const SORT_LABELS: Record<string, string> = {
+  name: 'Name',
   size_bytes: 'Storage',
   num_objects: 'Objects',
   shares_count: 'Shares',
@@ -18,14 +20,16 @@ const COL_COUNT = 8
 function BucketsView() {
   const [buckets, setBuckets] = useState<AdminBucket[]>([])
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useAutoError()
   const [filter, setFilter] = useState('')
   const [deleting, setDeleting] = useState<number | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<AdminBucket | null>(null)
   const [confirmText, setConfirmText] = useState('')
+  const [deleteError, setDeleteError] = useState<string | null>(null)
+  const [forceDeleting, setForceDeleting] = useState(false)
   const [activeTenant, setActiveTenant] = useState<string | null>(null)
-  const [sortField, setSortField] = useState<SortField>(null)
-  const [sortDir, setSortDir] = useState<SortDir>('asc')
+  const [sortField, setSortField] = useState<SortField>('size_bytes')
+  const [sortDir, setSortDir] = useState<SortDir>('desc')
   const [expandedBuckets, setExpandedBuckets] = useState<Set<number>>(new Set())
   const [allPerms, setAllPerms] = useState<AdminPermission[] | null>(null)
   const [permsLoading, setPermsLoading] = useState(false)
@@ -46,6 +50,7 @@ function BucketsView() {
 
   const handleDeleteConfirm = async () => {
     if (!deleteTarget) return
+    setDeleteError(null)
     try {
       setDeleting(deleteTarget.id)
       await adminAPI.deleteBucket(deleteTarget.id)
@@ -53,9 +58,25 @@ function BucketsView() {
       setDeleteTarget(null)
       setConfirmText('')
     } catch (err: unknown) {
-      setError(getApiError(err, 'Delete failed'))
+      setDeleteError(getApiError(err, 'Delete failed'))
     } finally {
       setDeleting(null)
+    }
+  }
+
+  const handleForceDelete = async () => {
+    if (!deleteTarget) return
+    try {
+      setForceDeleting(true)
+      await adminAPI.deleteBucket(deleteTarget.id, true)
+      setBuckets((prev) => prev.filter((b) => b.id !== deleteTarget.id))
+      setDeleteTarget(null)
+      setConfirmText('')
+      setDeleteError(null)
+    } catch (err: unknown) {
+      setError(getApiError(err, 'Force delete failed'))
+    } finally {
+      setForceDeleting(false)
     }
   }
 
@@ -65,7 +86,7 @@ function BucketsView() {
       else { setSortField(null); setSortDir('asc') }
     } else {
       setSortField(field)
-      setSortDir('asc')
+      setSortDir(field === 'size_bytes' ? 'desc' : 'asc')
     }
   }
 
@@ -108,13 +129,20 @@ function BucketsView() {
     )
   })
 
+  const bucketDisplayName = (bucket: AdminBucket) => bucket.display_name || bucket.name
+
   const sorted = sortField
     ? [...filtered].sort((a, b) => {
         let cmp: number
-        if (sortField === 'created_at') {
+        if (sortField === 'name') {
+          cmp = bucketDisplayName(a).localeCompare(bucketDisplayName(b))
+        } else if (sortField === 'created_at') {
           cmp = new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
         } else {
           cmp = (a[sortField] as number) - (b[sortField] as number)
+        }
+        if (cmp === 0 && sortField !== 'name') {
+          return bucketDisplayName(a).localeCompare(bucketDisplayName(b))
         }
         return sortDir === 'asc' ? cmp : -cmp
       })
@@ -159,7 +187,9 @@ function BucketsView() {
         <table className="admin-table">
           <thead>
             <tr>
-              <th>Name</th>
+              <th style={sortableThStyle} onClick={() => toggleSort('name')}>
+                {SORT_LABELS.name}{sortIndicator('name')}
+              </th>
               <th>Tenant</th>
               <th>Type</th>
               <th style={sortableThStyle} onClick={() => toggleSort('size_bytes')}>
@@ -236,12 +266,19 @@ function BucketsView() {
                                       </span>
                                     )}
                                   </span>
-                                  <span style={{
-                                    fontSize: '0.75rem',
-                                    fontWeight: 500,
-                                    color: p.permission === 'owner' ? '#2563eb' : p.permission === 'rw' ? '#059669' : '#6b7280',
-                                  }}>
-                                    {p.permission === 'owner' ? 'Owner' : p.permission === 'rw' ? 'RW' : 'RO'}
+                                  <span style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                    {(p.file_count > 0 || p.storage_bytes > 0) && (
+                                      <span style={{ fontSize: '0.72rem', color: '#94a3b8' }}>
+                                        {p.file_count} file{p.file_count !== 1 ? 's' : ''} · {formatSize(p.storage_bytes)}
+                                      </span>
+                                    )}
+                                    <span style={{
+                                      fontSize: '0.75rem',
+                                      fontWeight: 500,
+                                      color: p.permission === 'owner' ? '#2563eb' : p.permission === 'rw' ? '#059669' : '#6b7280',
+                                    }}>
+                                      {p.permission === 'owner' ? 'Owner' : p.permission === 'rw' ? 'RW' : 'RO'}
+                                    </span>
                                   </span>
                                 </div>
                               ))}
@@ -263,7 +300,7 @@ function BucketsView() {
       <div className="admin-table-footer">{sorted.length} of {buckets.length} buckets</div>
 
       {deleteTarget && (
-        <div className="modal-overlay" onClick={() => setDeleteTarget(null)}>
+        <div className="modal-overlay" onClick={() => { setDeleteTarget(null); setDeleteError(null) }}>
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>
             <h2>Delete Bucket</h2>
             <p style={{ color: '#dc2626', fontWeight: 600, margin: '0.5rem 0' }}>
@@ -281,7 +318,7 @@ function BucketsView() {
               autoFocus
             />
             <div className="modal-buttons">
-              <button className="button-secondary" onClick={() => setDeleteTarget(null)}>Cancel</button>
+              <button className="button-secondary" onClick={() => { setDeleteTarget(null); setDeleteError(null) }}>Cancel</button>
               <button
                 className="button-delete-small"
                 disabled={confirmText !== deleteTarget.name || deleting === deleteTarget.id}
@@ -291,6 +328,27 @@ function BucketsView() {
                 {deleting === deleteTarget.id ? 'Deleting...' : 'Delete Forever'}
               </button>
             </div>
+            {deleteError && (
+              <div style={{ marginTop: '1rem', padding: '0.75rem', background: '#fef3c7', border: '1px solid #f59e0b', borderRadius: '6px' }}>
+                <p style={{ margin: '0 0 0.4rem', fontWeight: 600, color: '#92400e', fontSize: '0.88rem' }}>
+                  Delete failed
+                </p>
+                <p style={{ margin: '0 0 0.6rem', color: '#78350f', fontSize: '0.83rem' }}>
+                  {deleteError}
+                </p>
+                <p style={{ margin: '0 0 0.75rem', color: '#78350f', fontSize: '0.83rem' }}>
+                  If the underlying storage was already removed externally, you can remove the database record only.
+                </p>
+                <button
+                  className="button-delete-small"
+                  disabled={forceDeleting}
+                  onClick={handleForceDelete}
+                  style={{ width: '100%', padding: '0.5rem' }}
+                >
+                  {forceDeleting ? 'Removing...' : 'Remove DB Record Only'}
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}

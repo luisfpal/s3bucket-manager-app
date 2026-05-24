@@ -4,6 +4,13 @@ import logging
 from django.db import IntegrityError
 from social_core.exceptions import AuthForbidden
 
+from storage.access import (
+    is_nffadi_tenant,
+    is_valid_nffadi_mapping,
+    is_write_capable,
+    structure_name,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -300,78 +307,115 @@ def create_or_update_user(backend, details, response, user=None, *args, **kwargs
 
 
 def extract_tenant_info(backend, details, response, user=None, *args, **kwargs):
-    """Resolve tenant memberships from Authentik groups, then RGWSquared fallback."""
+    """Resolve tenant memberships from Authentik groups and RGWSquared state."""
     if not user:
         return None
 
-    from storage.models import GroupTenantMapping, TenantMembership, UOMapping
+    from storage.models import GroupTenantMapping, TenantMembership
 
     # preferred_username is the Ceph subuser name used by RGWSquared.
     ceph_username = response.get("preferred_username") or user.username
+    groups = response.get("groups", []) or []
+
+    mappings = list(
+        GroupTenantMapping.objects.select_related("tenant").filter(
+            authentik_group__in=groups,
+            tenant__is_active=True,
+        )
+    )
+    if not mappings:
+        logger.warning(
+            "Login rejected for %s: Authentik groups %r have no matching GroupTenantMapping",
+            user.username,
+            groups,
+        )
+        raise AuthForbidden(
+            backend,
+            "No GroupTenantMapping matched Authentik groups %r — access denied." % (groups,),
+        )
 
     matched_tenants = []
+    for mapping in mappings:
+        tenant = mapping.tenant
 
-    groups = response.get("groups", [])
-    group_matched_tenants = []
-    if groups:
-        for mapping in GroupTenantMapping.objects.select_related("tenant").filter(
-            authentik_group__in=groups, tenant__is_active=True
-        ):
-            tenant = mapping.tenant
-            membership, created = TenantMembership.objects.get_or_create(
-                user=user,
-                tenant=tenant,
-                defaults={
-                    "ceph_username": ceph_username,
-                    "role": "rw",
-                },
-            )
-            if created:
-                logger.info(
-                    f"Created TenantMembership from group: {user.username} → {tenant.code}"
+        if is_nffadi_tenant(tenant):
+            if not is_valid_nffadi_mapping(mapping):
+                logger.warning(
+                    "Ignoring invalid NFFADI mapping group=%s role=%s for user=%s",
+                    mapping.authentik_group,
+                    mapping.role,
+                    user.username,
                 )
-            matched_tenants.append(tenant.code)
-            group_matched_tenants.append(tenant)
+                continue
+            if _sync_rgwsquared_user_access(user, ceph_username, tenant, required=True):
+                matched_tenants.append(tenant.code)
+            continue
 
-    # Staff may match by Authentik group and still own RGWSquared proposal buckets.
-    if group_matched_tenants:
-        _sync_group_user_buckets(user, ceph_username, group_matched_tenants)
+        membership, created = TenantMembership.objects.get_or_create(
+            user=user,
+            tenant=tenant,
+            defaults={
+                "ceph_username": ceph_username,
+                "role": mapping.role,
+                "is_active": True,
+            },
+        )
+        update_fields = []
+        if membership.ceph_username != ceph_username:
+            membership.ceph_username = ceph_username
+            update_fields.append("ceph_username")
+        if membership.role != mapping.role:
+            membership.role = mapping.role
+            update_fields.append("role")
+        if not membership.is_active:
+            membership.is_active = True
+            update_fields.append("is_active")
+        if update_fields:
+            membership.save(update_fields=update_fields)
+        if created:
+            logger.info(
+                "Created TenantMembership from group: %s -> %s (role=%s)",
+                user.username,
+                tenant.code,
+                mapping.role,
+            )
+
+        matched_tenants.append(tenant.code)
+        _sync_rgwsquared_user_access(user, ceph_username, tenant, required=False)
+
+    _sync_uo_codes_for_user(user)
 
     if not matched_tenants:
-        matched_tenants = _rgwsquared_tenant_lookup(user, ceph_username)
+        logger.warning(
+            "Login rejected for %s: group mappings matched but no activated tenant remained eligible",
+            user.username,
+        )
+        raise AuthForbidden(
+            backend,
+            "Group mappings found for %s but no tenant remained eligible after processing." % (user.username,),
+        )
 
-    # UO codes drive NFFADI local bucket names.
-    if user.institution:
-        for membership in TenantMembership.objects.filter(user=user, is_active=True):
-            if not membership.uo_code:
-                uo = UOMapping.objects.filter(
-                    tenant=membership.tenant,
-                    institution_name__icontains=user.institution,
-                ).first()
-                if uo:
-                    membership.uo_code = uo.uo_code
-                    membership.save(update_fields=["uo_code"])
-                    logger.info(
-                        f"Set uo_code={uo.uo_code} for {user.username} in {membership.tenant.code}"
-                    )
-
-    if matched_tenants:
-        logger.info(f"User {user.username} matched tenants: {matched_tenants}")
-
+    logger.info("User %s matched tenants: %s", user.username, matched_tenants)
     return None
 
 
-def _sync_group_user_buckets(user, ceph_username, tenants):
-    """For group-matched users, fetch their RGWSquared buckets and create DB records.
+def _sync_rgwsquared_user_access(user, ceph_username, tenant, required=False):
+    """Sync one user's RGWSquared role/buckets for a tenant.
 
-    Staff users (e.g., @areasciencepark.it) match via Authentik groups but may also
-    have RGWSquared-managed proposal buckets that need Bucket+BucketPermission records.
+    Returns True when RGWSquared confirms the user belongs to the structure.
+    For optional tenants, failures only skip bucket refinement; the group mapping
+    remains the login authority. For NFFADI, callers pass required=True.
     """
     from django.conf import settings
+    from storage.models import TenantMembership
     from storage.services.rgw_squared import RGWSquaredClient
 
+    structure = structure_name(tenant)
+    if not structure:
+        return False
     if not settings.RGWSQUARED_URL or not settings.RGWSQUARED_USERNAME:
-        return
+        logger.warning("RGWSquared not configured, skipping user access sync")
+        return False
 
     try:
         client = RGWSquaredClient(
@@ -379,102 +423,91 @@ def _sync_group_user_buckets(user, ceph_username, tenants):
             settings.RGWSQUARED_USERNAME,
             settings.RGWSQUARED_PASSWORD,
         )
-        for tenant in tenants:
-            if not tenant.rgwsquared_structure:
-                continue
-            try:
-                users = client.list_users(tenant.rgwsquared_structure)
-                if ceph_username not in users:
-                    continue
-                info = client.get_user_info(tenant.rgwsquared_structure, ceph_username)
-                ro_buckets = info.get("ROBuckets", [])
-                rw_buckets = info.get("RWBuckets", [])
+        users = client.list_users(structure)
+        if ceph_username not in users:
+            logger.warning(
+                "RGWSquared user %s not found in structure %s", ceph_username, structure
+            )
+            return False
 
-                from storage.models import TenantMembership
+        info = client.get_user_info(structure, ceph_username)
+        ro_buckets = info.get("ROBuckets", [])
+        rw_buckets = info.get("RWBuckets", [])
+        role = "rw" if rw_buckets else "ro"
 
-                TenantMembership.objects.filter(user=user, tenant=tenant).update(
-                    role="rw" if rw_buckets else "ro",
-                )
-
-                bucket_items = client.list_buckets(tenant.rgwsquared_structure)
-                _sync_user_buckets_on_login(
-                    user, tenant, ro_buckets, rw_buckets, bucket_items=bucket_items
-                )
-            except Exception as e:
-                logger.warning(f"Group user bucket sync failed for {tenant.code}: {e}")
-    except Exception as e:
-        logger.warning(f"Group user bucket sync failed: {e}")
-
-
-def _rgwsquared_tenant_lookup(user, ceph_username):
-    """Query RGWSquared to find which structures contain this user.
-
-    Called when Authentik group matching finds nothing (external researchers).
-    Returns list of matched tenant codes.
-    """
-    from django.conf import settings
-    from storage.models import Tenant, TenantMembership
-    from storage.services.rgw_squared import RGWSquaredClient
-
-    if not settings.RGWSQUARED_URL or not settings.RGWSQUARED_USERNAME:
-        logger.warning("RGWSquared not configured, skipping tenant lookup")
-        return []
-
-    matched = []
-    try:
-        client = RGWSquaredClient(
-            settings.RGWSQUARED_URL,
-            settings.RGWSQUARED_USERNAME,
-            settings.RGWSQUARED_PASSWORD,
+        bucket_items = client.list_buckets(structure)
+        _sync_user_buckets_on_login(
+            user,
+            tenant,
+            ro_buckets,
+            rw_buckets,
+            bucket_items=bucket_items,
         )
 
-        for tenant in Tenant.objects.filter(is_active=True, code="NFFADI").exclude(
-            rgwsquared_structure=""
-        ):
-            structure = tenant.rgwsquared_structure
-            try:
-                users = client.list_users(structure)
-                if ceph_username not in users:
-                    continue
-
-                info = client.get_user_info(structure, ceph_username)
-                ro_buckets = info.get("ROBuckets", [])
-                rw_buckets = info.get("RWBuckets", [])
-                role = "rw" if rw_buckets else "ro"
-
-                membership, created = TenantMembership.objects.get_or_create(
-                    user=user,
-                    tenant=tenant,
-                    defaults={
-                        "ceph_username": ceph_username,
-                        "role": role,
-                    },
-                )
-                if created:
-                    logger.info(
-                        f"Created TenantMembership from RGWSquared: "
-                        f"{user.username} → {tenant.code} (role={role}, "
-                        f"RO={len(ro_buckets)}, RW={len(rw_buckets)})"
-                    )
-                elif membership.role != role:
-                    membership.role = role
-                    membership.save(update_fields=["role"])
-
-                bucket_items = client.list_buckets(structure)
-                _sync_user_buckets_on_login(
-                    user, tenant, ro_buckets, rw_buckets, bucket_items=bucket_items
-                )
-
-                matched.append(tenant.code)
-
-            except Exception as e:
-                logger.warning(f"RGWSquared lookup failed for {structure}: {e}")
-                continue
-
+        membership, _ = TenantMembership.objects.update_or_create(
+            user=user,
+            tenant=tenant,
+            defaults={
+                "ceph_username": ceph_username,
+                "role": role,
+                "is_active": True,
+            },
+        )
+        if not is_write_capable(membership.role) and membership.uo_code:
+            membership.uo_code = ""
+            membership.save(update_fields=["uo_code"])
+        return True
     except Exception as e:
-        logger.warning(f"RGWSquared tenant lookup failed: {e}")
+        if required:
+            logger.warning(
+                "Required RGWSquared access sync failed for %s/%s: %s",
+                structure,
+                ceph_username,
+                e,
+            )
+        else:
+            logger.warning(
+                "Optional RGWSquared access sync failed for %s/%s: %s",
+                structure,
+                ceph_username,
+                e,
+            )
+        return False
 
-    return matched
+
+def _sync_uo_codes_for_user(user):
+    """Assign UO codes only to write-capable memberships and clear stale RO UO."""
+    from storage.models import TenantMembership, UOMapping
+
+    for membership in TenantMembership.objects.select_related("tenant").filter(
+        user=user,
+        is_active=True,
+    ):
+        if not is_write_capable(membership.role):
+            if membership.uo_code:
+                membership.uo_code = ""
+                membership.save(update_fields=["uo_code"])
+                logger.info(
+                    "Cleared uo_code for read-only membership %s in %s",
+                    user.username,
+                    membership.tenant.code,
+                )
+            continue
+
+        if user.institution and not membership.uo_code:
+            uo = UOMapping.objects.filter(
+                tenant=membership.tenant,
+                institution_name__icontains=user.institution,
+            ).first()
+            if uo:
+                membership.uo_code = uo.uo_code
+                membership.save(update_fields=["uo_code"])
+                logger.info(
+                    "Set uo_code=%s for %s in %s",
+                    uo.uo_code,
+                    user.username,
+                    membership.tenant.code,
+                )
 
 
 def _sync_user_buckets_on_login(
@@ -521,7 +554,7 @@ def _sync_user_buckets_on_login(
             },
         )
         if created:
-            logger.info(f"Created proposal Bucket: {tenant.code}/{bare_name}")
+            logger.info("Created proposal Bucket: %s/%s", tenant.code, bare_name)
 
         # Never downgrade RW if RGWSquared also reports the bucket as RO.
         existing = BucketPermission.objects.filter(bucket=bucket, user=user).first()
