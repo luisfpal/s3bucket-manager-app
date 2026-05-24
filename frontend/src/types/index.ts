@@ -27,6 +27,7 @@ export interface TenantInfo {
   role: 'ro' | 'rw' | 'admin';
   uo_code?: string;
   uo_name?: string;
+  document?: { tab_name: string; is_visible: boolean } | null;
 }
 
 export interface NexusDetectResponse {
@@ -111,6 +112,8 @@ export interface AdminPermission {
   permission: string;
   source: string;
   granted_at: string;
+  file_count: number;
+  storage_bytes: number;
 }
 
 export interface AdminBucket {
@@ -129,14 +132,19 @@ export interface AdminBucket {
 
 export interface AdminUser {
   id: number;
+  membership_id: number;
   user_id: number;
+  tenant_id: number;
   ceph_username: string;
   display_name: string;
   email: string;
   tenant_code: string;
+  tenant_name: string;
   role: string;
   uo_code: string;
   last_login: string | null;
+  file_count: number;
+  total_file_size: number;
 }
 
 export interface AdminTenant {
@@ -146,7 +154,7 @@ export interface AdminTenant {
   member_count: number;
   bucket_count: number;
   storage_bytes: number;
-  initialized: boolean;
+  initialized: boolean | null;
   buckets_auto: number;
   buckets_manual: number;
 }
@@ -156,6 +164,38 @@ export interface AdminGroupMapping {
   authentik_group: string;
   tenant_code: string;
   tenant_id: number;
+  role: 'rw' | 'ro';
+}
+
+export interface AdminTenantActivation {
+  structure: string;
+  available_in_rgwsquared: boolean;
+  tenant_id: number | null;
+  tenant_code: string;
+  tenant_name: string;
+  has_tenant: boolean;
+  initialized: boolean | null;
+  buckets_auto: number;
+  buckets_manual: number;
+  member_count: number;
+  bucket_count: number;
+  storage_bytes: number;
+  group_mappings: AdminGroupMapping[];
+  group_mapping_count: number;
+  has_group_mapping: boolean;
+  group_mapping_ready: boolean;
+  group_mapping_issue: string;
+  required_group_name: string | null;
+  role_source: 'authentik_group' | 'rgwsquared';
+  suggested_rw_group: string;
+  suggested_ro_group: string;
+  has_rw_mapping: boolean;
+  has_ro_mapping: boolean;
+  requires_uo_sync: boolean;
+  uo_ready: boolean;
+  missing_uo_count: number;
+  write_capable_member_count: number;
+  fully_active: boolean;
 }
 
 export interface AdminUOMapping {
@@ -169,7 +209,58 @@ export interface AdminAvailableTenant {
   structure: string;
   has_tenant: boolean;
   tenant_id: number | null;
-  initialized: boolean;
+  initialized: boolean | null;  // null = structureInfo unavailable
   buckets_auto: number;
   buckets_manual: number;
+}
+
+export interface CreateTenantPayload {
+  structure: string;
+  name: string;
+  bucket_name_prefix?: string;
+}
+
+export interface AdminUserFile {
+  file_key: string;
+  bucket_name: string;
+  tenant_code: string;
+  file_size: number;
+  uploaded_at: string;
+}
+
+export interface FileNameRule {
+  id: number;
+  tenant_code: string;
+  substring: string;
+}
+
+export interface FileDeviation {
+  user_id: number;
+  ceph_username: string;
+  display_name: string;
+  deviation_count: number;
+  files: { file_key: string; bucket_name: string }[];
+}
+
+export interface TenantDocument {
+  tab_name: string;
+  content: string;
+  is_visible: boolean;
+  updated_at: string;
+}
+
+export interface FileFormatEntry {
+  extension: string;
+  count: number;
+  size_bytes: number;
+  proposal_count: number;
+  local_count: number;
+  proposal_size: number;
+  local_size: number;
+}
+
+export interface FileFormatsResponse {
+  total_files: number;
+  total_size_bytes: number;
+  formats: FileFormatEntry[];
 }

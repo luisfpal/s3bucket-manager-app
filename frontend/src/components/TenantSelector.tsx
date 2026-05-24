@@ -1,3 +1,4 @@
+import { useAutoError } from '../hooks/useAutoMessage'
 /**
  * TenantSelector — shown after login when user has multiple tenants.
  */
@@ -14,7 +15,7 @@ interface TenantSelectorProps {
 function TenantSelector({ tenants }: TenantSelectorProps) {
   const navigate = useNavigate()
   const [selecting, setSelecting] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useAutoError()
 
   const handleSelect = async (tenant: TenantInfo) => {
     try {

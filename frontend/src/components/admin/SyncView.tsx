@@ -1,268 +1,117 @@
-import { useState, useEffect, useRef } from 'react'
+import { useAutoError } from '../../hooks/useAutoMessage'
+/**
+ * SyncView — NFFADI instruments CSV upload.
+ *
+ * Uploads the CSV to RGWSquared (/s3structnffadi/csvUpload), which stores the
+ * instrument list for its scheduled 4-hour structure update cycle.
+ * UO codes and institution mappings are updated immediately from the CSV.
+ *
+ * Tenant refresh (pulling users/buckets from RGWSquared into the local DB) is
+ * handled by the per-tenant "Refresh" buttons in the Tenants view, not here.
+ */
+
+import { useState, useRef } from 'react'
 import { adminAPI, getApiError } from '../../services/api'
-import type { AdminAvailableTenant } from '../../types'
 
-type StepStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped'
-
-interface PipelineStep {
-  label: string
-  status: StepStatus
-  result?: string
-  error?: string
-}
-
-const INITIAL_STEPS: PipelineStep[] = [
-  { label: '1. Upload CSV to RGWSquared', status: 'pending' },
-  { label: '2. Update RGWSquared structure', status: 'pending' },
-  { label: '3. Refresh local Django cache', status: 'pending' },
-]
-
-function statusIcon(s: StepStatus) {
-  switch (s) {
-    case 'pending': return '\u23f3'
-    case 'running': return '\ud83d\udd04'
-    case 'done': return '\u2705'
-    case 'failed': return '\u274c'
-    case 'skipped': return '\u23ed\ufe0f'
-  }
+interface UploadResult {
+  instruments_uploaded?: number
+  uo_codes_updated?: number
+  execTime?: string
+  [key: string]: unknown
 }
 
 function SyncView() {
-  const [structures, setStructures] = useState<AdminAvailableTenant[]>([])
-  const [selectedStructure, setSelectedStructure] = useState('')
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [result, setResult] = useState<string | null>(null)
-
-  const [syncing, setSyncing] = useState(false)
-  const [steps, setSteps] = useState<PipelineStep[]>(INITIAL_STEPS)
-  const [pipelineRunning, setPipelineRunning] = useState(false)
+  const [uploading, setUploading] = useState(false)
+  const [result, setResult] = useState<UploadResult | null>(null)
+  const [error, setError] = useAutoError()
   const fileRef = useRef<HTMLInputElement>(null)
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const data = await adminAPI.getAvailableTenants()
-        setStructures(data)
-        if (data.length > 0) setSelectedStructure(data[0].structure)
-      } catch (err: unknown) {
-        setError(getApiError(err, 'Failed to load structures from RGWSquared'))
-      } finally {
-        setLoading(false)
-      }
-    })()
-  }, [])
-
-  const handleRefresh = async () => {
-    if (!selectedStructure) return
-    try {
-      setSyncing(true)
-      setError(null)
-      setResult(null)
-      const data = await adminAPI.syncRefresh(selectedStructure)
-      setResult(JSON.stringify(data, null, 2))
-    } catch (err: unknown) {
-      setError(getApiError(err, 'Sync refresh failed'))
-    } finally {
-      setSyncing(false)
-    }
-  }
-
-  const updateStep = (idx: number, updates: Partial<PipelineStep>) => {
-    setSteps(prev => prev.map((s, i) => i === idx ? { ...s, ...updates } : s))
-  }
-
-  const runPipeline = async () => {
-    const file = fileRef.current?.files?.[0] || null
-    if (file && file.size > 10 * 1024 * 1024) {
-      setError('File too large (max 10 MB)')
+  const handleUpload = async (e: React.FormEvent) => {
+    e.preventDefault()
+    const file = fileRef.current?.files?.[0]
+    if (!file) {
+      setError('Please select a CSV file.')
       return
     }
-    const structure = selectedStructure || 'NFFADI'
+    if (file.size > 10 * 1024 * 1024) {
+      setError('File too large (max 10 MB).')
+      return
+    }
+    if (!file.name.toLowerCase().endsWith('.csv')) {
+      setError('Please select a .csv file.')
+      return
+    }
 
-    setPipelineRunning(true)
+    setUploading(true)
     setError(null)
     setResult(null)
-    setSteps(INITIAL_STEPS.map((s, i) =>
-      (!file && i === 0) ? { ...s, status: 'skipped' as StepStatus } : s
-    ))
 
     try {
-      if (file) {
-        updateStep(0, { status: 'running' })
-        const csvResult = await adminAPI.syncUploadCSV(file)
-        updateStep(0, { status: 'done', result: summarize(csvResult) })
-      } else {
-        updateStep(0, { status: 'skipped', result: 'No CSV selected' })
-      }
-
-      updateStep(1, { status: 'running' })
-      const updateResult = await adminAPI.syncUpdateStructure(structure, true)
-      updateStep(1, { status: 'done', result: summarize(updateResult) })
-
-      updateStep(2, { status: 'running' })
-      const refreshResult = await adminAPI.syncRefresh(structure)
-      updateStep(2, { status: 'done', result: summarize(refreshResult) })
-
-      setResult('Pipeline completed successfully')
+      const res = await adminAPI.syncUploadCSV(file) as UploadResult
+      setResult(res)
       if (fileRef.current) fileRef.current.value = ''
     } catch (err: unknown) {
-      const msg = getApiError(err, 'Pipeline step failed')
-      setError(msg)
-      setSteps(prev => prev.map(s => s.status === 'running' ? { ...s, status: 'failed', error: msg } : s))
+      setError(getApiError(err, 'CSV upload failed'))
     } finally {
-      setPipelineRunning(false)
+      setUploading(false)
     }
   }
-
-  if (loading) return <div className="admin-loading">Loading...</div>
 
   return (
     <div>
       <div className="admin-page-header">
-        <h1>Sync Operations</h1>
+        <h1>NFFADI CSV Upload</h1>
       </div>
 
-      {error && <div className="error-message" onClick={() => setError(null)}>{error}</div>}
-      {result && !pipelineRunning && (
-        <div className="success-message">
-          <pre style={{ whiteSpace: 'pre-wrap', fontSize: '0.8rem' }}>{result}</pre>
+      <p style={{ color: '#6b7280', marginBottom: '1rem', maxWidth: '640px' }}>
+        Upload the NFFADI instruments CSV to RGWSquared. UO codes for users will be
+        updated immediately from the CSV. RGWSquared will process the instrument list
+        on its scheduled 4-hour cycle.
+      </p>
+      <p style={{ color: '#94a3b8', marginBottom: '1.5rem', maxWidth: '640px', fontSize: '0.8rem' }}>
+        To pull the latest users and buckets from RGWSquared into the local database,
+        use the <strong>Refresh</strong> button on the <a href="/admin/tenants" style={{ color: '#6366f1' }}>Tenants page</a>.
+      </p>
+
+      {error && (
+        <div className="error-message" style={{ marginBottom: '1rem' }} onClick={() => setError(null)}>
+          {error}
+        </div>
+      )}
+
+      {result && (
+        <div style={{
+          marginBottom: '1.5rem', padding: '0.75rem 1rem',
+          background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '6px',
+          color: '#166534', fontSize: '0.875rem',
+        }}>
+          <div style={{ fontWeight: 600, marginBottom: '0.25rem' }}>✓ CSV uploaded successfully</div>
+          {result.instruments_uploaded !== undefined && (
+            <div>Instruments uploaded: <strong>{result.instruments_uploaded}</strong></div>
+          )}
+          {result.uo_codes_updated !== undefined && (
+            <div>User UO codes updated: <strong>{result.uo_codes_updated}</strong></div>
+          )}
+          {result.execTime && (
+            <div style={{ color: '#6b7280', marginTop: '0.25rem', fontSize: '0.8rem' }}>
+              {String(result.execTime)}
+            </div>
+          )}
         </div>
       )}
 
       <div className="admin-sync-section">
-        <h2>Refresh Local Cache</h2>
-        <p>Sync RGWSquared state into Django database for a specific tenant.</p>
-        <div style={{ display: 'flex', gap: '0.5rem', marginTop: '1rem' }}>
-          <select
-            value={selectedStructure}
-            onChange={(e) => setSelectedStructure(e.target.value)}
-            className="admin-select"
-          >
-            <option value="">Select structure...</option>
-            {structures.map((s) => (
-              <option key={s.structure} value={s.structure}>
-                {s.structure}
-              </option>
-            ))}
-          </select>
-          <button
-            onClick={handleRefresh}
-            disabled={syncing || !selectedStructure || pipelineRunning}
-            className="button-primary"
-          >
-            {syncing ? 'Syncing...' : 'Refresh Cache'}
-          </button>
-        </div>
-      </div>
-
-      <div className="admin-sync-section">
-        <h2>Full Sync Pipeline</h2>
-        <p>
-          Optionally upload an instruments CSV, ask RGWSquared to update the structure,
-          then refresh Django's local cache.
-        </p>
-
-        <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', marginTop: '1rem', flexWrap: 'wrap' }}>
-          <input type="file" accept=".csv" ref={fileRef} disabled={pipelineRunning} />
-        </div>
-
-        <div style={{ marginTop: '0.75rem' }}>
-          <button
-            onClick={runPipeline}
-            disabled={pipelineRunning || syncing}
-            className="button-primary"
-          >
-            {pipelineRunning ? 'Running Pipeline...' : 'Run Full Pipeline'}
-          </button>
-        </div>
-
-        {(pipelineRunning || steps.some(s => s.status !== 'pending')) && (
-          <div style={{ marginTop: '1rem' }}>
-            {steps.map((step, i) => (
-              <div key={i} style={{
-                padding: '0.5rem 0.75rem',
-                marginBottom: '0.25rem',
-                borderRadius: '4px',
-                fontSize: '0.875rem',
-                background: step.status === 'running' ? '#eff6ff'
-                  : step.status === 'failed' ? '#fef2f2'
-                  : step.status === 'done' ? '#f0fdf4'
-                  : 'transparent',
-              }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  <span>{statusIcon(step.status)}</span>
-                  <span style={{
-                    fontWeight: step.status === 'running' ? 600 : 400,
-                    color: step.status === 'failed' ? '#dc2626'
-                      : step.status === 'skipped' ? '#9ca3af'
-                      : 'inherit',
-                  }}>
-                    {step.label}
-                  </span>
-                </div>
-                {step.result && (
-                  <div style={{
-                    marginTop: '0.25rem',
-                    marginLeft: '1.75rem',
-                    fontSize: '0.8rem',
-                    color: '#6b7280',
-                    whiteSpace: 'pre-wrap',
-                    maxHeight: '100px',
-                    overflow: 'auto',
-                  }}>
-                    {step.result}
-                  </div>
-                )}
-                {step.error && (
-                  <div style={{
-                    marginTop: '0.25rem',
-                    marginLeft: '1.75rem',
-                    fontSize: '0.8rem',
-                    color: '#dc2626',
-                  }}>
-                    {step.error}
-                  </div>
-                )}
-              </div>
-            ))}
+        <form onSubmit={handleUpload}>
+          <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', flexWrap: 'wrap' }}>
+            <input type="file" accept=".csv" ref={fileRef} disabled={uploading} />
+            <button type="submit" className="button-primary" disabled={uploading}>
+              {uploading ? 'Uploading…' : 'Upload CSV'}
+            </button>
           </div>
-        )}
-
-        {pipelineRunning && (
-          <p style={{ color: '#888', fontSize: '0.8rem', marginTop: '0.5rem' }}>
-            This may take a few minutes. Do not close this page.
-          </p>
-        )}
+        </form>
       </div>
     </div>
   )
-}
-
-function summarize(data: unknown): string {
-  if (data === null || data === undefined) return 'OK'
-  if (typeof data === 'string') return data
-  const obj = data as Record<string, unknown>
-  // RGWSquared wraps payloads in { execTime, req, res }.
-  if (obj.execTime) {
-    const res = obj.res
-    if (Array.isArray(res)) return `${res.length} items (${obj.execTime})`
-    if (res && typeof res === 'object') {
-      const r = res as Record<string, unknown>
-      if (r.numProposals) return `${r.numProposals} proposals (${obj.execTime})`
-      // CSV upload returns the instrument rows under res.data.
-      if (Array.isArray(r.data)) return `${r.data.length} instruments uploaded (${obj.execTime})`
-      if (r.count) return `${r.count} items (${obj.execTime})`
-      return `OK (${obj.execTime})`
-    }
-    return `OK (${obj.execTime})`
-  }
-  // Django cache refresh returns per-table sync counts.
-  if (obj.users_synced !== undefined) {
-    return `${obj.users_synced} users, ${obj.buckets_synced} buckets, ${obj.permissions_synced} permissions synced`
-  }
-  if (obj.status) return String(obj.message || obj.status)
-  return JSON.stringify(data).slice(0, 200)
 }
 
 export default SyncView

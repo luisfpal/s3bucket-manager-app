@@ -1,3 +1,4 @@
+import { useAutoError } from '../hooks/useAutoMessage'
 /**
  * ShareModal — Manage bucket sharing (local research buckets only).
  */
@@ -17,7 +18,7 @@ function ShareModal({ bucketId, bucketName, onClose }: ShareModalProps) {
   const [username, setUsername] = useState('')
   const [permission, setPermission] = useState<'ro' | 'rw'>('ro')
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useAutoError()
   const [adding, setAdding] = useState(false)
   const [updatingShareId, setUpdatingShareId] = useState<number | null>(null)
 
@@ -91,7 +92,7 @@ function ShareModal({ bucketId, bucketName, onClose }: ShareModalProps) {
             type="text"
             className="modal-input"
             style={{ flex: 1, marginBottom: 0 }}
-            placeholder="Email or username"
+            placeholder="Email or display username (e.g. name.surname)"
             value={username}
             onChange={(e) => setUsername(e.target.value)}
           />

@@ -319,6 +319,7 @@ class FileUploadRecord(models.Model):
     file_key = models.CharField(max_length=1024)
     uploaded_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
     uploaded_at = models.DateTimeField(auto_now_add=True)
+    file_size = models.BigIntegerField(default=0)
 
     class Meta:
         db_table = "file_upload_records"
@@ -350,22 +351,99 @@ class UOMapping(models.Model):
 
 
 class GroupTenantMapping(models.Model):
-    """Maps an Authentik group name to a tenant.
+    """Maps an Authentik group name to a tenant with an access role.
 
     Used for @areasciencepark.it users who may belong to multiple tenants.
     The JWT 'groups' claim is matched against this table to determine
-    which tenants a user can access.
+    which tenants a user can access and with what role.
 
-    Example: "lame-users" → LAME tenant, "nffa-di-users" → NFFADI tenant
+    Each tenant can have at most one RW group and one RO group:
+    - RW group (role="rw"): e.g. "lage-users" — grants read-write access
+    - RO group (role="ro"): e.g. "lage-ext"  — grants read-only access
+    - NFFADI uses a single group "nffa-di-users" with role="rw"; RO is determined
+      at login time by inspecting the user's actual bucket permissions in RGWSquared.
+
+    Example:
+      "nffa-di-users" → NFFADI, role="rw"
+      "lage-users"   → LAGE,   role="rw"
+      "lage-ext"     → LAGE,   role="ro"
     """
 
-    authentik_group = models.CharField(max_length=200, unique=True)
+    ROLE_CHOICES = [
+        ("rw", "Read-Write"),
+        ("ro", "Read-Only"),
+    ]
+
+    authentik_group = models.CharField(
+        max_length=200,
+        unique=True,
+        help_text="Authentik group name. Each group name can only map to one tenant.",
+    )
     tenant = models.ForeignKey(
         Tenant, on_delete=models.CASCADE, related_name="group_mappings"
+    )
+    role = models.CharField(
+        max_length=10,
+        choices=ROLE_CHOICES,
+        default="rw",
+        help_text=(
+            "rw = this group grants read-write access; "
+            "ro = this group grants read-only access"
+        ),
     )
 
     class Meta:
         db_table = "group_tenant_mappings"
+        unique_together = [("tenant", "role")]  # max one rw group + one ro group per tenant
 
     def __str__(self):
-        return f"{self.authentik_group} → {self.tenant.code}"
+        return f"{self.authentik_group} → {self.tenant.code} ({self.role})"
+
+
+class FileNameRule(models.Model):
+    """Required substring for filenames uploaded to a tenant.
+
+    A file DEVIATES if its name contains NONE of the tenant's rules.
+    Zero rules = no constraints; all filenames are accepted.
+    """
+
+    tenant = models.ForeignKey(
+        Tenant, on_delete=models.CASCADE, related_name="file_name_rules"
+    )
+    substring = models.CharField(max_length=200)
+
+    class Meta:
+        db_table = "file_name_rules"
+        unique_together = [("tenant", "substring")]
+
+    def __str__(self):
+        return f"{self.tenant.code}: must contain '{self.substring}'"
+
+
+class TenantDocument(models.Model):
+    """Per-tenant Markdown document shown to users as a configurable nav tab.
+
+    When is_visible=False or content is empty, no nav tab appears for users.
+    Admin can replace, clear, or delete this record at any time.
+    """
+
+    tenant = models.OneToOneField(
+        Tenant, on_delete=models.CASCADE, related_name="document"
+    )
+    tab_name = models.CharField(
+        max_length=100,
+        default="Documentation",
+        help_text="Label shown in the user nav bar",
+    )
+    content = models.TextField(blank=True, help_text="Markdown source")
+    is_visible = models.BooleanField(
+        default=False,
+        help_text="Show the tab to users only when True and content is non-empty",
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "tenant_documents"
+
+    def __str__(self):
+        return f"{self.tenant.code} doc ({self.tab_name}, visible={self.is_visible})"

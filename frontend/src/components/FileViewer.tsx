@@ -1,13 +1,14 @@
+import { useAutoError } from '../hooks/useAutoMessage'
 /** Modal file viewer with inline renderers for supported file types. */
 
 import { useState, useEffect, useRef } from 'react'
+import mammoth from 'mammoth'
 import { bucketAPI, getApiError } from '../services/api'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
+import MarkdownViewer from './MarkdownViewer'
 
 const MAX_TEXT_BYTES = 5 * 1024 * 1024 // 5 MB
 
-type ViewerType = 'image' | 'text' | 'pdf' | 'csv' | 'html' | 'markdown'
+type ViewerType = 'image' | 'text' | 'pdf' | 'csv' | 'html' | 'markdown' | 'docx'
 
 interface FileViewerProps {
   bucketId: number
@@ -72,9 +73,10 @@ function FileViewer({ bucketId, fileKey, fileSize, onClose }: FileViewerProps) {
   const viewerType = getViewerType(fileKey)
   const fileName = getFileName(fileKey)
   const isTextBased = viewerType === 'text' || viewerType === 'csv' || viewerType === 'html' || viewerType === 'markdown'
+  const isDocx = viewerType === 'docx'
 
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useAutoError()
   const [objectUrl, setObjectUrl] = useState<string | null>(null)
   const [textContent, setTextContent] = useState<string | null>(null)
   const [imageZoomed, setImageZoomed] = useState(false)
@@ -99,7 +101,14 @@ function FileViewer({ bucketId, fileKey, fileSize, onClose }: FileViewerProps) {
         const blob = await bucketAPI.getFileBlob(bucketId, fileKey, { signal: controller.signal })
         if (!isActive) return
 
-        if (isTextBased) {
+        if (isDocx) {
+          // Convert DOCX to HTML using mammoth (client-side, no server required)
+          const arrayBuffer = await blob.arrayBuffer()
+          if (!isActive) return
+          const result = await mammoth.convertToHtml({ arrayBuffer })
+          if (!isActive) return
+          setTextContent(result.value || '<p>Empty document</p>')
+        } else if (isTextBased) {
           const text = await blob.text()
           if (!isActive) return
 
@@ -137,7 +146,7 @@ function FileViewer({ bucketId, fileKey, fileSize, onClose }: FileViewerProps) {
       isActive = false
       controller.abort()
     }
-  }, [bucketId, fileKey, fileSize, viewerType, isTextBased])
+  }, [bucketId, fileKey, fileSize, viewerType, isTextBased, isDocx])
 
   // Browser object URLs pin memory until they are revoked.
   useEffect(() => {
@@ -160,14 +169,12 @@ function FileViewer({ bucketId, fileKey, fileSize, onClose }: FileViewerProps) {
   const csvHeader = csvRows.length > 0 ? csvRows[0] : []
   const csvBody = csvRows.length > 1 ? csvRows.slice(1) : []
 
-  const viewerLabel = viewerType === 'csv'
-    ? 'CSV'
-    : viewerType === 'html'
-      ? 'HTML'
-      : viewerType === 'markdown'
-        ? 'Markdown'
-        : viewerType.toUpperCase()
-  const modalWidth = viewerType === 'pdf' || viewerType === 'html' || viewerType === 'csv' || viewerType === 'markdown' ? '90vw' : '80vw'
+  const viewerLabel = viewerType === 'csv' ? 'CSV'
+    : viewerType === 'html' ? 'HTML'
+    : viewerType === 'markdown' ? 'Markdown'
+    : viewerType === 'docx' ? 'Word Document'
+    : viewerType.toUpperCase()
+  const modalWidth = viewerType === 'pdf' || viewerType === 'html' || viewerType === 'csv' || viewerType === 'markdown' || viewerType === 'docx' ? '90vw' : '80vw'
 
   return (
     <div
@@ -362,43 +369,22 @@ function FileViewer({ bucketId, fileKey, fileSize, onClose }: FileViewerProps) {
               srcDoc={textContent}
               sandbox="allow-same-origin"
               title={fileName}
-              style={{
-                width: '100%',
-                height: '80vh',
-                border: 'none',
-                background: '#fff',
-              }}
+              style={{ width: '100%', height: '80vh', border: 'none', background: '#fff' }}
+            />
+          )}
+
+          {!loading && !error && viewerType === 'docx' && textContent !== null && (
+            <iframe
+              srcDoc={`<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{font-family:Georgia,serif;max-width:860px;margin:2rem auto;padding:0 1.5rem;line-height:1.7;color:#1e293b}h1,h2,h3{color:#0f172a}table{border-collapse:collapse;width:100%}td,th{border:1px solid #e2e8f0;padding:.4rem .6rem}p{margin:.6rem 0}</style></head><body>${textContent}</body></html>`}
+              sandbox="allow-same-origin"
+              title={fileName}
+              style={{ width: '100%', height: '80vh', border: 'none', background: '#fff' }}
             />
           )}
 
           {!loading && !error && viewerType === 'markdown' && textContent !== null && (
-            <div style={{
-              width: '100%',
-              maxHeight: '80vh',
-              overflow: 'auto',
-              padding: '1rem 1.25rem',
-              lineHeight: 1.6,
-              color: '#0f172a',
-            }}>
-              <ReactMarkdown
-                remarkPlugins={[remarkGfm]}
-                components={{
-                  pre: ({ node, ...props }) => (
-                    <pre
-                      {...props}
-                      style={{
-                        background: '#0f172a',
-                        color: '#e2e8f0',
-                        padding: '0.8rem',
-                        borderRadius: '8px',
-                        overflowX: 'auto',
-                      }}
-                    />
-                  ),
-                }}
-              >
-                {textContent}
-              </ReactMarkdown>
+            <div style={{ width: '100%', maxHeight: '80vh', overflow: 'auto', padding: '1rem 1.25rem' }}>
+              <MarkdownViewer content={textContent} />
             </div>
           )}
 

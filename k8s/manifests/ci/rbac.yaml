@@ -1,0 +1,64 @@
+# CI/CD RBAC — gives the GitHub Actions self-hosted runner (running in K3s via ARC)
+# the minimum permissions needed to deploy to the bucket-explorer namespace.
+#
+# The runner pod uses this ServiceAccount automatically (in-cluster config) —
+# no kubeconfig file or token rotation is required.
+#
+# What this grants (bucket-explorer namespace only):
+#   - Read/patch Deployments (for rollout restart)
+#   - Read/create/update ConfigMaps, Secrets, Services, PVCs (for kubectl apply)
+#   - Read pods and events (for rollout status + debugging)
+#
+# What this does NOT grant:
+#   - Cluster-level operations (namespaces, nodes, RBAC changes)
+#   - Access to any other namespace
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: github-runner-sa
+  namespace: github-runner
+  annotations:
+    # Human-readable: what can this account do and why?
+    purpose: "GitHub Actions self-hosted runner deployed by ARC for automated deploys"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: deployer
+  namespace: bucket-explorer
+rules:
+  # Read + patch Deployments — needed for kubectl rollout restart and rollout status
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "patch", "update"]
+  # Read rollout events — needed for kubectl rollout status --watch
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list"]
+  # Read/create/update the app's config resources — needed for kubectl apply
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets", "services", "persistentvolumeclaims"]
+    verbs: ["get", "list", "create", "update", "patch", "apply"]
+  # Read pod state — needed for rollout status and log inspection
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list"]
+  # Read events — needed for kubectl describe (troubleshooting failed rollouts)
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: github-runner-deployer
+  namespace: bucket-explorer
+subjects:
+  - kind: ServiceAccount
+    name: github-runner-sa
+    namespace: github-runner
+roleRef:
+  kind: Role
+  name: deployer
+  apiGroup: rbac.authorization.k8s.io

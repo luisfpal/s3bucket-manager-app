@@ -5,6 +5,7 @@ import re
 
 from django.http import HttpResponse
 from django.db import transaction
+from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiResponse
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -75,6 +76,79 @@ def _error_response(message, response_status=status.HTTP_500_INTERNAL_SERVER_ERR
     return Response({"error": str(message)}, status=response_status)
 
 
+def _looks_like_duplicate_bucket_error(message, bucket_name):
+    text = str(message).lower()
+    return (
+        "duplicate" in text
+        or "already exist" in text
+        or ("exist" in text and ("bucket" in text or bucket_name.lower() in text))
+    )
+
+
+def _apply_filename_policy(bucket, requesting_user, original_key):
+    """Rename uploaded file keys according to the tenant/bucket-type policy.
+
+    Policy:
+      NFFADI + proposal: {tenant}-{display_name}-{uo_of_uploader}-{filename}
+      NFFADI + local:    {tenant}-{uo_of_uploader}-{display_name}-{filename}
+      other  + proposal: {tenant}-{display_name}-{filename}
+      other  + local:    {tenant}-{display_name}-{filename}
+
+    - {tenant} = tenant code lowercased
+    - {display_name} = bucket.display_name (proposal ID or project name)
+    - {uo_of_uploader} = uploading user's TenantMembership.uo_code (NFFADI only)
+      For local NFFADI buckets: the uploader's UO, not the owner's — since all RW
+      users have UO codes and shared uploads need per-uploader file governance.
+      uo_code dots translated to dashes: cnr-iom.ts → cnr-iom-ts
+    - {filename} = original file key (last path component if nested)
+    If uo_code is empty, the {uo} segment is omitted.
+    """
+    tenant_slug = re.sub(r"[^a-z0-9-]", "-", bucket.tenant.code.lower()).strip("-")
+
+    # Sanitize the original filename: preserve extension, replace non-safe chars with dashes.
+    # This prevents S3 key issues from spaces, accented characters, parentheses, etc.
+    raw_filename = original_key.split("/")[-1] if "/" in original_key else original_key
+    if "." in raw_filename:
+        raw_base, raw_ext = raw_filename.rsplit(".", 1)
+        safe_base = re.sub(r"[^a-z0-9._-]", "-", raw_base.lower())
+        safe_base = re.sub(r"-{2,}", "-", safe_base).strip("-") or "file"
+        safe_ext = re.sub(r"[^a-z0-9]", "", raw_ext.lower())
+        filename = f"{safe_base}.{safe_ext}" if safe_ext else safe_base
+    else:
+        safe_base = re.sub(r"[^a-z0-9._-]", "-", raw_filename.lower())
+        filename = re.sub(r"-{2,}", "-", safe_base).strip("-") or "file"
+
+    display = re.sub(r"[^a-z0-9-]", "-", (bucket.display_name or bucket.name).lower()).strip("-")
+
+    uo = ""
+    if bucket.tenant.code == "NFFADI":
+        # Always use the uploader's UO code for NFFADI (proposal and local).
+        # Dots in uo_code (e.g. cnr-iom.ts) translate to dashes for valid filenames.
+        m = TenantMembership.objects.filter(
+            user=requesting_user, tenant=bucket.tenant, is_active=True
+        ).first()
+        raw_uo = (m.uo_code or "").strip() if m else ""
+        uo = raw_uo.replace(".", "-")  # cnr-iom.ts → cnr-iom-ts
+
+    if uo:
+        if bucket.bucket_type == Bucket.PROPOSAL:
+            new_key = f"{tenant_slug}-{display}-{uo}-{filename}"
+        else:
+            new_key = f"{tenant_slug}-{uo}-{display}-{filename}"
+    else:
+        new_key = f"{tenant_slug}-{display}-{filename}"
+
+    # Sanitize: collapse multiple dashes, strip leading/trailing dashes (keep filename ext intact)
+    base, _, ext = new_key.rpartition(".")
+    if ext:
+        base = re.sub(r"-{2,}", "-", base).strip("-")
+        new_key = f"{base}.{ext}"
+    else:
+        new_key = re.sub(r"-{2,}", "-", new_key).strip("-")
+
+    return new_key
+
+
 def _block_if_storage_uninitialized(tenant):
     try:
         ensure_structure_initialized(tenant)
@@ -136,6 +210,15 @@ def _current_local_permission_map(bucket):
     }
 
 
+TENANT_ID_PARAM = OpenApiParameter(
+    "X-Tenant-ID",
+    location=OpenApiParameter.HEADER,
+    required=True,
+    description="Active tenant ID. Obtain from the `tenants` array in `GET /api/auth/token/` then confirm with `POST /api/auth/select-tenant/`.",
+)
+
+
+@extend_schema(tags=["Buckets"])
 class BucketViewSet(viewsets.ViewSet):
     """Tenant-scoped bucket operations.
 
@@ -153,6 +236,12 @@ class BucketViewSet(viewsets.ViewSet):
 
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(
+        summary="List accessible buckets",
+        description="Returns all buckets (proposal + local) where the user has a BucketPermission record, with S3 storage stats.",
+        parameters=[TENANT_ID_PARAM],
+        responses={200: OpenApiResponse(description="List of buckets with storage stats"), 400: OpenApiResponse(description="Missing X-Tenant-ID")},
+    )
     def list(self, request):
         """List buckets the user can access in the active tenant."""
         membership = _get_membership(request)
@@ -187,6 +276,21 @@ class BucketViewSet(viewsets.ViewSet):
         )
         return Response(serializer.data)
 
+    @extend_schema(
+        summary="Create a local research bucket",
+        description=(
+            "Creates a user-owned LOCAL bucket in RGWSquared and the local database. "
+            "The internal S3 bucket name is derived from `{ceph_username}-{uo_code}-{project_id}` "
+            "(NFFADI) or `{ceph_username}-{project_id}` (other tenants). "
+            "The user becomes the `owner` and gets full permission immediately."
+        ),
+        parameters=[TENANT_ID_PARAM],
+        responses={
+            201: OpenApiResponse(description="Created bucket"),
+            400: OpenApiResponse(description="Invalid project ID / missing UO code / name conflict"),
+            403: OpenApiResponse(description="Read-only user cannot create buckets"),
+        },
+    )
     def create(self, request):
         """Create a local research bucket.
 
@@ -267,7 +371,7 @@ class BucketViewSet(viewsets.ViewSet):
 
         if Bucket.objects.filter(name=bare_name, tenant=tenant).exists():
             return Response(
-                {"error": f"Bucket '{bare_name}' already exists"},
+                {"error": f"Bucket '{project_id}' already exists"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -282,6 +386,11 @@ class BucketViewSet(viewsets.ViewSet):
                 ro_permissions=[],
             )
         except RGWSquaredError as e:
+            if _looks_like_duplicate_bucket_error(e, bare_name):
+                return _error_response(
+                    f"Bucket '{project_id}' already exists",
+                    status.HTTP_400_BAD_REQUEST,
+                )
             return _error_response(e, status.HTTP_400_BAD_REQUEST)
         except RuntimeError as e:
             return _error_response(e, status.HTTP_503_SERVICE_UNAVAILABLE)
@@ -323,6 +432,11 @@ class BucketViewSet(viewsets.ViewSet):
             status=status.HTTP_201_CREATED,
         )
 
+    @extend_schema(
+        summary="Bucket detail with file listing",
+        description="Returns bucket metadata plus the list of all objects in the S3 bucket. Each file includes `uploaded_by` from FileUploadRecord where available.",
+        responses={200: OpenApiResponse(description="Bucket + files"), 403: OpenApiResponse(description="No permission"), 404: OpenApiResponse(description="Bucket not found")},
+    )
     def retrieve(self, request, pk=None):
         """Bucket detail with file listing."""
         try:
@@ -363,6 +477,11 @@ class BucketViewSet(viewsets.ViewSet):
 
         return Response(bucket_data)
 
+    @extend_schema(
+        summary="Delete a local research bucket (owner only)",
+        description="Deletes the bucket from RGWSquared and all local database records. Only applies to LOCAL buckets (`is_deletable=True`). Proposal buckets (from RGWSquared sync) cannot be deleted.",
+        responses={204: None, 403: OpenApiResponse(description="Not owner / proposal bucket"), 404: OpenApiResponse(description="Not found")},
+    )
     def destroy(self, request, pk=None):
         """Delete a local research bucket (owner only)."""
         try:
@@ -421,7 +540,10 @@ class BucketViewSet(viewsets.ViewSet):
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         file_obj = serializer.validated_data["file"]
-        file_key = serializer.validated_data.get("key", file_obj.name)
+        raw_key = serializer.validated_data.get("key", file_obj.name)
+
+        # Apply filename policy: rename key according to tenant/bucket-type rules.
+        file_key = _apply_filename_policy(bucket, request.user, raw_key)
 
         # Read once; uploaded file streams are consumed after .read().
         file_bytes = file_obj.read()
@@ -442,11 +564,15 @@ class BucketViewSet(viewsets.ViewSet):
         FileUploadRecord.objects.update_or_create(
             bucket=bucket,
             file_key=file_key,
-            defaults={"uploaded_by": request.user},
+            defaults={"uploaded_by": request.user, "file_size": len(file_bytes)},
         )
 
         return Response(
-            {"message": f"File '{file_key}' uploaded", "key": file_key},
+            {
+                "message": f"File '{file_key}' uploaded",
+                "key": file_key,
+                "original_key": raw_key,
+            },
             status=status.HTTP_201_CREATED,
         )
 
@@ -668,10 +794,18 @@ class BucketViewSet(viewsets.ViewSet):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            # Accept the three identifiers admins see in the UI and RGWSquared.
+            # Accept multiple identifier formats in order of most-natural to least:
+            # 1. Full email (name.surname@example.com)
+            # 2. Display username — email local-part set at first login (name.surname)
+            # 3. Authentik username (internal; rarely typed by users, kept for compat)
+            # 4. RGWSquared ceph_username (for instrument-scientist accounts)
             target_user = None
             if "@" in identifier:
                 target_user = User.objects.filter(email=identifier).first()
+            if not target_user:
+                # display_username is the email local-part (e.g. "name.surname" from
+                # "name.surname@example.com"), unique per user, collision-safe.
+                target_user = User.objects.filter(display_username__iexact=identifier).first()
             if not target_user:
                 target_user = User.objects.filter(username=identifier).first()
             if not target_user:
@@ -698,13 +832,20 @@ class BucketViewSet(viewsets.ViewSet):
                 )
 
             # Sharing is tenant-local; cross-tenant grants would bypass isolation.
-            if not TenantMembership.objects.filter(
-                user=target_user,
-                tenant=bucket.tenant,
-                is_active=True,
-            ).exists():
+            target_membership = TenantMembership.objects.filter(
+                user=target_user, tenant=bucket.tenant, is_active=True
+            ).first()
+            if not target_membership:
                 return Response(
                     {"error": f'User "{identifier}" is not a member of this tenant'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            # Governance: file naming requires a UO code from the uploader.
+            # RW permission may only be granted to users with RW role (they have UO codes).
+            if permission == "rw" and target_membership.role != "rw":
+                return Response(
+                    {"error": f'"{identifier}" has read-only access and cannot be granted write permission. Only RW users may receive write permissions.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 

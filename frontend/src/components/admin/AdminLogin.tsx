@@ -1,11 +1,13 @@
+import { useAutoError } from '../../hooks/useAutoMessage'
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { adminAPI, authStorage, getApiError } from '../../services/api'
+import BrandMark from '../BrandMark'
 
 function AdminLogin() {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useAutoError()
   const [loading, setLoading] = useState(false)
   const navigate = useNavigate()
 
@@ -30,7 +32,8 @@ function AdminLogin() {
       <div className="auth-container">
         <div className="auth-card">
           <h1 className="auth-title">Admin Login</h1>
-          <p style={{ color: '#666', fontSize: '0.875rem', marginBottom: '0.5rem', textAlign: 'center' }}>S3 Bucket Manager</p>
+          <p style={{ color: '#666', fontSize: '0.875rem', marginBottom: '0.5rem', textAlign: 'center' }}>Buckets Explorer</p>
+          <BrandMark />
           {error && <div className="error-message">{error}</div>}
           <form className="auth-form" onSubmit={handleSubmit}>
             <div className="form-group">

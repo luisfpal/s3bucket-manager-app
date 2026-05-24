@@ -1,3 +1,4 @@
+import { useAutoError } from '../hooks/useAutoMessage'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 
@@ -34,7 +35,7 @@ function NexusViewer() {
 
   const [user, setUser] = useState<User | null>(null)
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useAutoError()
   const [fileSize, setFileSize] = useState<number>(0)
   const [, setDetect] = useState<NexusDetectResponse | null>(null)
 

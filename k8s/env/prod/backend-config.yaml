@@ -5,7 +5,12 @@ metadata:
   namespace: bucket-explorer
 data:
   DJANGO_DEBUG: "False"
-  DJANGO_ALLOWED_HOSTS: "REPLACE_WITH_PROD_ALLOWED_HOSTS"
+  # DJANGO_ALLOWED_HOSTS: comma-separated list of Host header values Django will accept.
+  # - buckets-explorer.areasciencepark.it: required — HAProxy forwards the browser's Host header unchanged
+  # - backend-service: required — K8s liveness/readiness probes send Host: backend-service (see 02-backend.yaml)
+  # - localhost and 127.0.0.1 removed: not needed in prod; only useful for direct kubectl port-forward debugging
+  # See internal_docs/learning/19_ALLOWED_HOSTS_AND_DJANGO_SECURITY.md for full explanation.
+  DJANGO_ALLOWED_HOSTS: "buckets-explorer.areasciencepark.it,backend-service"
   DJANGO_LOG_LEVEL: "INFO"
   OAUTH_LOG_LEVEL: "INFO"
 
@@ -14,7 +19,7 @@ data:
   DATABASE_NAME: "djangodb"
   DATABASE_USER: "djangouser"
 
-  S3_ENDPOINT: "REPLACE_WITH_PROD_S3_ENDPOINT"
+  S3_ENDPOINT: ""
   S3_USE_SSL: "True"
   S3_VERIFY_SSL: "True"
   S3_REGION: "eu-south-1"
@@ -22,12 +27,15 @@ data:
 
   # In production, Authentik is external. Both AUTHENTIK_URL and AUTHENTIK_EXTERNAL_URL
   # are the same public URL (e.g. https://orfeo-auth.areasciencepark.it).
-  AUTHENTIK_URL: "REPLACE_WITH_PROD_AUTHENTIK_URL"
-  AUTHENTIK_EXTERNAL_URL: "REPLACE_WITH_PROD_AUTHENTIK_EXTERNAL_URL"
-  OIDC_CLIENT_ID: "REPLACE_WITH_PROD_OIDC_CLIENT_ID"
+  AUTHENTIK_URL: "https://orfeo-auth.areasciencepark.it"
+  AUTHENTIK_EXTERNAL_URL: "https://orfeo-auth.areasciencepark.it"
+  OIDC_CLIENT_ID: "adrbCHRmzURihzf54e22XkoJtVBQBw6D58v8kKgx"
   # OIDC_APPLICATION_SLUG: the slug from the admin's OIDC discovery URL.
   # Example: if the URL is https://authentik.example.com/application/o/my-app/.well-known/...
   # then set this to "my-app". For orfeo: "buckets-explorer"
-  OIDC_APPLICATION_SLUG: "REPLACE_WITH_PROD_OIDC_APPLICATION_SLUG"
+  OIDC_APPLICATION_SLUG: "buckets-explorer"
 
-  RGWSQUARED_URL: "REPLACE_WITH_PROD_RGWSQUARED_URL"
+  RGWSQUARED_URL: "http://rgwsquared.dev.rd.areasciencepark.it"
+
+  DJANGO_SUPERUSER_USERNAME: "admin"
+  DJANGO_SUPERUSER_EMAIL: "luis.palacios@areasciencepark.it"

@@ -5,19 +5,18 @@
 #
 # PURPOSE:
 #   Manages the Authentik identity provider in the authentik-bucket-explorer
-#   namespace. This is the INFRASTRUCTURE layer — in production, Authentik is
-#   provisioned by infrastructure administrators and treated as an external
-#   dependency by the application team.
+#   namespace. This is the INFRASTRUCTURE layer — Authentik must be deployed
+#   and configured before the webapp can start (app.sh handles the webapp layer).
 #
-#   The companion script app.sh manages the webapp layer (bucket-explorer ns)
-#   independently. These two scripts are self-contained and do not call each other.
+#   The two scripts are self-contained and do not call each other. Deploy infra
+#   first, then deploy the webapp: ./infra.sh deploy && ./app.sh deploy.
 #
 # USAGE:
-#   ./infra.sh deploy [--env dev|prod] [--skip-config]
+#   ./infra.sh deploy [--skip-config]
 #                         Deploy Authentik: namespace, secrets, databases, server
 #                         Then configure OAuth2 provider for the webapp
 #
-#   ./infra.sh configure [--env dev|prod]
+#   ./infra.sh configure
 #                         Re-run OAuth2 configuration only (no manifest re-apply)
 #                         Useful after manual Authentik changes or credential rotation
 #
@@ -64,7 +63,7 @@
 #   to obtain the OIDC client secret. This requires kubeconfig access to both
 #   namespaces, which infra administrators are expected to have.
 #   If the webapp has not been deployed yet, skip this step with --skip-config
-#   and run: ./infra.sh configure --env dev   after the webapp is up.
+#   and run: ./infra.sh configure   after the webapp is up.
 #
 # ==============================================================================
 
@@ -86,7 +85,6 @@ K3S_NODES=("192.168.132.10" "192.168.132.11" "192.168.132.12")
 TUNNEL_SOCK="/tmp/k3s-api-tunnel.sock"
 TUNNEL_KUBECONFIG="/tmp/k3s-tunnel-kubeconfig.yaml"
 
-DEPLOY_ENV="${DEPLOY_ENV:-dev}"
 ENV_DIR=""
 INFRA_SECRETS_FILE=""
 AUTHENTIK_SERVICE_FILE=""
@@ -195,12 +193,7 @@ ensure_kubeconfig() {
 # ==============================================================================
 
 resolve_infra_environment_files() {
-    case "$DEPLOY_ENV" in
-        dev|prod) ;;
-        *) fail "Unsupported --env '$DEPLOY_ENV' (expected: dev|prod)" ;;
-    esac
-
-    ENV_DIR="$ENV_BASE_DIR/$DEPLOY_ENV"
+    ENV_DIR="$ENV_BASE_DIR/dev"
     INFRA_SECRETS_FILE="$ENV_DIR/infra-secrets.yaml"
 
     # Local override (gitignored, contains real credentials)
@@ -209,16 +202,14 @@ resolve_infra_environment_files() {
 
     [ -f "$INFRA_SECRETS_FILE" ] || fail "Missing infra secrets file: $INFRA_SECRETS_FILE"
 
-    # Dev-only: NodePort service for local browser access to the Authentik UI
+    # NodePort service for local browser access to the Authentik UI
     AUTHENTIK_SERVICE_FILE=""
-    if [ "$DEPLOY_ENV" = "dev" ]; then
-        local nodeport_local="$ENV_DIR/authentik-service-nodeport.local.yaml"
-        local nodeport_default="$ENV_DIR/authentik-service-nodeport.yaml"
-        if [ -f "$nodeport_local" ]; then
-            AUTHENTIK_SERVICE_FILE="$nodeport_local"
-        elif [ -f "$nodeport_default" ]; then
-            AUTHENTIK_SERVICE_FILE="$nodeport_default"
-        fi
+    local nodeport_local="$ENV_DIR/authentik-service-nodeport.local.yaml"
+    local nodeport_default="$ENV_DIR/authentik-service-nodeport.yaml"
+    if [ -f "$nodeport_local" ]; then
+        AUTHENTIK_SERVICE_FILE="$nodeport_local"
+    elif [ -f "$nodeport_default" ]; then
+        AUTHENTIK_SERVICE_FILE="$nodeport_default"
     fi
 
     if [[ "$INFRA_SECRETS_FILE" == *.local.yaml ]]; then
@@ -226,20 +217,12 @@ resolve_infra_environment_files() {
     fi
 }
 
-run_infra_production_safety_checks() {
-    if [ "$DEPLOY_ENV" != "prod" ]; then
-        return 0
-    fi
-    grep -q "REPLACE_WITH_PROD_" "$INFRA_SECRETS_FILE" && \
-        fail "Prod infra-secrets still has placeholders: $INFRA_SECRETS_FILE"
-}
-
 # ==============================================================================
 # Apply Authentik infra manifests
 # ==============================================================================
 
 apply_infra_manifests_for_env() {
-    step "Deploying Authentik infra (env=$DEPLOY_ENV, ns=$INFRA_NAMESPACE)"
+    step "Deploying Authentik infra ($INFRA_NAMESPACE)"
 
     # Namespace + infra secrets must exist before any Authentik resource is applied
     kubectl apply -f "$INFRA_MANIFESTS_DIR/00-namespace.yaml"
@@ -283,7 +266,7 @@ configure_authentik_from_cluster() {
     # and instruct the operator to run this after deploying the webapp.
     if ! kubectl get namespace "$APP_NAMESPACE" &>/dev/null 2>&1; then
         warn "App namespace '$APP_NAMESPACE' not found — skipping OAuth2 configuration."
-        warn "Deploy the webapp first, then re-run:  ./infra.sh configure --env $DEPLOY_ENV"
+        warn "Deploy the webapp first, then re-run:  ./infra.sh configure"
         return 0
     fi
     # The Authentik bootstrap password lives in the INFRA namespace (authentik-secret).
@@ -292,12 +275,7 @@ configure_authentik_from_cluster() {
     bootstrap_password=$(get_secret_value authentik-secret bootstrap-password "$INFRA_NAMESPACE")
     oidc_client_id=$(get_config_value backend-config OIDC_CLIENT_ID "$APP_NAMESPACE")
 
-    if [ "$DEPLOY_ENV" = "prod" ]; then
-        public_app_url="${PUBLIC_APP_URL:-}"
-        [ -z "$public_app_url" ] && fail "PUBLIC_APP_URL is required for prod Authentik config"
-    else
-        public_app_url="${PUBLIC_APP_URL:-http://localhost:3000}"
-    fi
+    public_app_url="${PUBLIC_APP_URL:-http://localhost:3000}"
 
     # Copy and run the configuration script inside the running Authentik pod
     kubectl cp "$SCRIPT_DIR/configure_authentik.py" \
@@ -319,7 +297,7 @@ configure_authentik_from_cluster() {
         success "Authentik configured and webapp backend restarted"
     else
         success "Authentik configured — webapp backend will pick up OAuth2 provider on first deploy"
-        info "Hint: run  ./app.sh deploy --env $DEPLOY_ENV  to deploy the webapp"
+        info "Hint: run  ./app.sh deploy  to deploy the webapp"
     fi
 }
 
@@ -333,16 +311,12 @@ deploy_infra() {
     while [ $# -gt 0 ]; do
         case "$1" in
             -h|--help)
-                echo "Usage: ./infra.sh deploy [--env dev|prod] [--skip-config]"
+                echo "Usage: ./infra.sh deploy [--skip-config]"
                 echo ""
                 echo "  --skip-config   Apply manifests but skip OAuth2 configuration."
                 echo "                  Useful when the webapp backend-secret does not exist yet."
                 echo "                  Run  ./infra.sh configure  after the webapp is deployed."
                 return 0
-                ;;
-            --env)
-                [ -z "${2:-}" ] && fail "--env requires an argument: dev|prod"
-                DEPLOY_ENV="$2"; shift
                 ;;
             --skip-config)
                 skip_config=true
@@ -353,10 +327,9 @@ deploy_infra() {
     done
 
     resolve_infra_environment_files
-    run_infra_production_safety_checks
     ensure_kubeconfig
 
-    step "Infra deploy start (env=$DEPLOY_ENV)"
+    step "Infra deploy start"
     apply_infra_manifests_for_env
 
     if [ "$skip_config" = false ]; then
@@ -365,10 +338,10 @@ deploy_infra() {
         warn "Skipping OAuth2 configuration (--skip-config). Run  ./infra.sh configure  later."
     fi
 
-    success "Infra deploy completed (env=$DEPLOY_ENV)"
+    success "Infra deploy completed"
     echo ""
     echo "  Authentik namespace : $INFRA_NAMESPACE"
-    echo "  Next step           : ./app.sh deploy --env $DEPLOY_ENV [--rebuild]"
+    echo "  Next step           : ./app.sh deploy [--rebuild]"
     echo ""
 }
 
@@ -377,16 +350,8 @@ deploy_infra() {
 # ==============================================================================
 
 run_configure() {
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --env)
-                [ -z "${2:-}" ] && fail "--env requires an argument: dev|prod"
-                DEPLOY_ENV="$2"; shift
-                ;;
-            *) fail "Unknown argument: $1" ;;
-        esac
-        shift
-    done
+    [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ] && {
+        echo "Usage: ./infra.sh configure"; exit 0; }
 
     resolve_infra_environment_files
     ensure_kubeconfig
@@ -471,7 +436,7 @@ run_cleanup() {
     success "Namespace $INFRA_NAMESPACE deleted"
     echo ""
     echo "  To verify:  kubectl get ns"
-    echo "  To redeploy: ./infra.sh deploy --env dev"
+    echo "  To redeploy: ./infra.sh deploy"
     echo ""
 }
 
@@ -675,10 +640,10 @@ usage() {
     echo "  Usage: ./infra.sh <command> [args]"
     echo ""
     echo "  Commands:"
-    echo "    deploy [--env dev|prod] [--skip-config]"
+    echo "    deploy [--skip-config]"
     echo "                   Deploy Authentik: namespace, secrets, databases, server"
     echo "                   Then configure the OAuth2 provider for the webapp"
-    echo "    configure [--env dev|prod]"
+    echo "    configure"
     echo "                   Re-run OAuth2 configuration only (no manifest re-apply)"
     echo "    status         Show pods in $INFRA_NAMESPACE"
     echo "    logs [comp]    Tail logs (authentik-server, authentik-worker)"
@@ -688,8 +653,8 @@ usage() {
     echo ""
     echo "  Namespace: $INFRA_NAMESPACE"
     echo ""
-    echo "  Environment overlays:"
-    echo "    k8s/env/{dev,prod}/infra-secrets.yaml     — authentik-secret"
+    echo "  Environment overlays (k8s/env/dev/):"
+    echo "    infra-secrets.yaml     — authentik-secret"
     echo "    Optional local overrides (gitignored): *.local.yaml"
     echo ""
     echo "  Companion script: ./app.sh  (manages the webapp in bucket-explorer namespace)"

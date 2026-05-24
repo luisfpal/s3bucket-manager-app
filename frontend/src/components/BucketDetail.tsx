@@ -1,3 +1,4 @@
+import { useAutoError } from '../hooks/useAutoMessage'
 /**
  * BucketDetail — Permission-aware file browser.
  *
@@ -25,7 +26,7 @@ function BucketDetail() {
   const [bucket, setBucket] = useState<BucketDetailType | null>(null)
   const [accessList, setAccessList] = useState<BucketAccessList | null>(null)
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useAutoError()
   const [uploading, setUploading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState<{ current: number; total: number } | null>(null)
   const [showShareModal, setShowShareModal] = useState(false)
@@ -34,32 +35,41 @@ function BucketDetail() {
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
-    loadData()
+    const ac = new AbortController()
+    loadData(ac.signal)
+    return () => ac.abort()
   }, [id])
 
-  const loadData = async () => {
+  // signal is only set by the route-change effect; post-upload/delete reloads
+  // run uncancelled because they're user-driven, not navigation-driven.
+  const loadData = async (signal?: AbortSignal) => {
     if (!id) return
+    const aborted = () => signal?.aborted === true
     try {
       setLoading(true)
       const bucketId = parseInt(id)
       const [userData, bucketData] = await Promise.all([
-        authAPI.getCurrentUser(),
-        bucketAPI.get(bucketId),
+        authAPI.getCurrentUser({ signal }),
+        bucketAPI.get(bucketId, { signal }),
       ])
+      if (aborted()) return
       setUser(userData)
       setBucket(bucketData)
 
       // Access lists are supplementary; bucket contents should still load if this fails.
       try {
-        const access = await bucketAPI.getAccessList(bucketId)
+        const access = await bucketAPI.getAccessList(bucketId, { signal })
+        if (aborted()) return
         setAccessList(access)
       } catch {
       }
     } catch (err) {
+      // Aborted requests surface as CanceledError; treat as no-op, not a failure.
+      if (aborted() || (err as Error)?.name === 'CanceledError') return
       console.error('Failed to load bucket:', err)
       setError('Failed to load bucket details.')
     } finally {
-      setLoading(false)
+      if (!aborted()) setLoading(false)
     }
   }
 
@@ -135,9 +145,24 @@ function BucketDetail() {
     }
   }
 
-  const canUpload = bucket?.permission === 'rw' || bucket?.permission === 'owner'
+  // Check user's UO code for NFFADI local bucket upload gating
+  const activeTenant = authAPI.getActiveTenant()
+  const freshTenant = user?.tenants?.find(t => t.id === activeTenant?.id)
+  const myUoCode = freshTenant?.uo_code || ''
+  const nffadiLocalNeedsUo = activeTenant?.code === 'NFFADI'
+    && bucket?.bucket_type === 'local'
+    && !myUoCode
+
+  const canUpload = !nffadiLocalNeedsUo && (bucket?.permission === 'rw' || bucket?.permission === 'owner')
   const isOwner = bucket?.permission === 'owner'
   const canLeave = bucket?.permission !== 'owner' && bucket?.bucket_type === 'local'
+
+  // Personal file summary (computed from existing file list, no extra API call)
+  const myDisplayName = user?.display_name
+  const myFiles = bucket?.files?.filter(f => f.uploaded_by === myDisplayName) ?? []
+  const myFileCount = myFiles.length
+  const myTotalSize = myFiles.reduce((sum, f) => sum + (f.size || 0), 0)
+  const totalSize = bucket?.files?.reduce((sum, f) => sum + (f.size || 0), 0) ?? 0
 
   if (loading) {
     return (
@@ -194,8 +219,48 @@ function BucketDetail() {
                 Share
               </button>
             )}
+            {nffadiLocalNeedsUo && (bucket?.permission === 'rw' || bucket?.permission === 'owner') && (
+              <div style={{
+                background: '#fef3c7', border: '1px solid #fcd34d',
+                borderRadius: '6px', padding: '0.5rem 0.75rem',
+                fontSize: '0.8rem', color: '#92400e',
+              }}>
+                Your account has not been fully registered yet. Contact your administrator to have your UO code assigned.
+              </div>
+            )}
             {canUpload && (
               <div className="upload-section">
+                {/* Filename policy notice — shows the applicable naming rule for this bucket */}
+                {bucket && (() => {
+                  const tenantCode = (activeTenant?.code || '').toUpperCase()
+                  const isNffadi = tenantCode === 'NFFADI'
+                  const isProposal = bucket.bucket_type === 'proposal'
+                  const bucketDisplay = bucket.display_name || bucket.name
+                  const tenantSlug = tenantCode.toLowerCase()
+
+                  let ruleText = ''
+                  if (isNffadi && isProposal)
+                    ruleText = `${tenantSlug}-${bucketDisplay}-{uo-code}-{your-filename}`
+                  else if (isNffadi && !isProposal)
+                    ruleText = `${tenantSlug}-{uo-code}-${bucketDisplay}-{your-filename}`
+                  else if (isProposal)
+                    ruleText = `${tenantSlug}-${bucketDisplay}-{your-filename}`
+                  else
+                    ruleText = `${tenantSlug}-${bucketDisplay}-{your-filename}`
+
+                  return (
+                    <div style={{
+                      marginBottom: '0.5rem', padding: '0.5rem 0.75rem',
+                      background: '#f0f9ff', border: '1px solid #bae6fd',
+                      borderRadius: '6px', fontSize: '0.8rem', color: '#0369a1',
+                    }}>
+                      <strong>📌 Filename policy:</strong> your files will be renamed to{' '}
+                      <code style={{ fontFamily: 'monospace', background: '#e0f2fe', padding: '0 0.3em', borderRadius: '3px' }}>
+                        {ruleText}
+                      </code>
+                    </div>
+                  )
+                })()}
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -307,6 +372,18 @@ function BucketDetail() {
             )}
           </div>
         ) : (
+          <>
+          {myFileCount > 0 && (
+            <div style={{
+              padding: '0.5rem 1rem', background: '#f0fdf4',
+              border: '1px solid #bbf7d0', borderRadius: '6px',
+              fontSize: '0.8rem', color: '#166534', marginBottom: '0.5rem',
+              display: 'flex', gap: '1.5rem',
+            }}>
+              <span>Your files: <strong>{myFileCount}</strong> · <strong>{formatSize(myTotalSize)}</strong></span>
+              <span style={{ color: '#9ca3af' }}>Total: <strong>{bucket.files.length}</strong> files · <strong>{formatSize(totalSize)}</strong></span>
+            </div>
+          )}
           <div className="files-table-container">
             <table className="files-table">
               <thead>
@@ -372,6 +449,7 @@ function BucketDetail() {
               {bucket.files.length} file{bucket.files.length !== 1 ? 's' : ''}
             </p>
           </div>
+          </>
         )}
       </div>
 

@@ -19,6 +19,7 @@ from storage.models import (
 )
 from storage.services.rgw_squared import RGWSquaredClient
 from storage.services.s3_ops import parse_rgwsquared_bucket_name
+from storage.access import is_write_capable
 
 logger = logging.getLogger(__name__)
 
@@ -42,9 +43,6 @@ def refresh_local_cache(tenant, client=None):
 
     Returns summary dict with counts.
     """
-    if tenant.code != "NFFADI":
-        return {"error": f"Tenant {tenant.code} is not enabled for sync"}
-
     if not tenant.rgwsquared_structure:
         return {"error": f"Tenant {tenant.code} has no rgwsquared_structure configured"}
 
@@ -167,8 +165,16 @@ def refresh_local_cache(tenant, client=None):
             },
         )
 
-        # UO codes are required for NFFADI local bucket naming.
-        if user.institution and not membership.uo_code:
+        # UO codes are only for write-capable users; RO users must not carry them.
+        if not is_write_capable(membership.role):
+            if membership.uo_code:
+                membership.uo_code = ""
+                membership.save(update_fields=["uo_code"])
+                stats["uo_codes_cleared"] = stats.get("uo_codes_cleared", 0) + 1
+                logger.info(
+                    f"Cleared uo_code for read-only user {username} in {tenant.code} during sync"
+                )
+        elif user.institution and not membership.uo_code:
             from storage.models import UOMapping
 
             uo = UOMapping.objects.filter(
@@ -178,6 +184,7 @@ def refresh_local_cache(tenant, client=None):
             if uo:
                 membership.uo_code = uo.uo_code
                 membership.save(update_fields=["uo_code"])
+                stats["uo_codes_updated"] = stats.get("uo_codes_updated", 0) + 1
                 logger.info(
                     f"Set uo_code={uo.uo_code} for {username} in {tenant.code} during sync"
                 )

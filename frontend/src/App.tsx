@@ -20,14 +20,18 @@ import Dashboard from './components/Dashboard'
 import BucketDetail from './components/BucketDetail'
 import NexusViewer from './components/NexusViewer'
 import Profile from './components/Profile'
+import TenantDocPage from './components/TenantDocPage'
 import AdminLogin from './components/admin/AdminLogin'
 import AdminLayout from './components/admin/AdminLayout'
 import BucketsView from './components/admin/BucketsView'
-import GroupMappingsView from './components/admin/GroupMappingsView'
 import UsersView from './components/admin/UsersView'
 import UOMappingsView from './components/admin/UOMappingsView'
 import TenantsView from './components/admin/TenantsView'
 import SyncView from './components/admin/SyncView'
+import FileNameRulesView from './components/admin/FileNameRulesView'
+import FileDeviationsView from './components/admin/FileDeviationsView'
+import TenantDocView from './components/admin/TenantDocView'
+import FileFormatsView from './components/admin/FileFormatsView'
 import { authStorage } from './services/api'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -48,16 +52,20 @@ function App() {
         <Route path="/buckets/:id" element={<ProtectedRoute><BucketDetail /></ProtectedRoute>} />
         <Route path="/buckets/:id/nexus" element={<ProtectedRoute><NexusViewer /></ProtectedRoute>} />
         <Route path="/profile" element={<ProtectedRoute><Profile /></ProtectedRoute>} />
+        <Route path="/guide" element={<ProtectedRoute><TenantDocPage /></ProtectedRoute>} />
 
         <Route path="/admin/login" element={<AdminLogin />} />
         <Route path="/admin" element={<AdminLayout />}>
           <Route index element={<Navigate to="/admin/buckets" replace />} />
           <Route path="buckets" element={<BucketsView />} />
-          <Route path="group-mappings" element={<GroupMappingsView />} />
           <Route path="users" element={<UsersView />} />
           <Route path="uo-mappings" element={<UOMappingsView />} />
           <Route path="tenants" element={<TenantsView />} />
           <Route path="sync" element={<SyncView />} />
+          <Route path="file-rules" element={<FileNameRulesView />} />
+          <Route path="file-deviations" element={<FileDeviationsView />} />
+          <Route path="file-formats" element={<FileFormatsView />} />
+          <Route path="tenant-docs" element={<TenantDocView />} />
         </Route>
 
         <Route path="/" element={<Navigate to="/dashboard" replace />} />

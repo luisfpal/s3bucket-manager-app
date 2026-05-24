@@ -1,0 +1,69 @@
+# Bucket Explorer
+
+S3 object storage management web app for multi-tenant research facilities.
+
+## Tech stack
+
+- Backend: Django 4.2 + Django REST Framework, PostgreSQL (gunicorn WSGI)
+- Frontend: React 18 + Vite + TypeScript, served by nginx
+- Auth: Authentik OIDC → JWT (social-auth-app-django + simplejwt)
+- Storage: Ceph RGW (S3-compatible), managed via RGWSquared microservice
+- Infra: Kubernetes (K3s dev, production cluster), images on GHCR (ghcr.io/luisfpal/)
+
+## Key domain concepts
+
+- **Tenant**: A research lab/project with its own S3 namespace (e.g. NFFADI, LAGE)
+- **TenantMembership**: User↔Tenant link — holds `ceph_username`, `role` (rw/ro), `uo_code`
+- **Bucket** (two types):
+  - `proposal`: created by RGWSquared sync from instrument data; undeletable; read-only metadata
+  - `local`: created by users for their own research; deletable by owner
+- **BucketPermission**: per-user, per-bucket access (owner / rw / ro); source `rgwsquared` or `local`
+- **FileUploadRecord**: tracks who uploaded each file (for shared-bucket governance)
+- **FileNameRule**: required substrings for filenames in a tenant (admin-configurable)
+- **TenantDocument**: per-tenant Markdown document shown as a configurable nav tab to users
+- **GroupTenantMapping**: maps an Authentik group to a tenant + role (used at login to assign memberships)
+
+## Authentication flow
+
+1. `GET /api/oauth/login/authentik/` — initiates OIDC redirect to Authentik
+2. Authentik authenticates user, redirects back with auth code
+3. `GET /api/auth/token/` — exchanges OAuth2 session for JWT; returns `access` + `refresh` tokens
+4. All subsequent requests: `Authorization: Bearer <access>`
+5. Multi-tenant users: `POST /api/auth/select-tenant/` to set `X-Tenant-ID`
+6. Bucket endpoints require `X-Tenant-ID` header
+
+## API
+
+- Base URL: `/api/`
+- Interactive docs (Swagger UI): `/api/docs/` (staff-only in production)
+- Machine-readable schema (OpenAPI JSON): `/api/schema/`
+- Auth endpoints: `/api/auth/`
+- Bucket CRUD: `/api/buckets/`
+- Admin endpoints (separate JWT): `/api/admin/`
+
+## Source layout
+
+```
+backend/
+  storage/
+    models.py          — all Django models (User, Tenant, Bucket, TenantMembership, ...)
+    views/
+      auth.py          — exchange_token, current_user, select_tenant
+      buckets.py       — BucketViewSet (list, create, retrieve, destroy, upload, download, shares)
+      admin.py         — admin panel endpoints (users, tenants, sync, file governance)
+    pipeline.py        — social-auth pipeline (user provisioning at login)
+    serializers.py     — DRF serializers
+  settings.py          — all configuration (env-driven)
+  urls.py              — URL routing
+
+frontend/
+  src/
+    services/api.ts    — all API calls (fully typed)
+    types/index.ts     — all TypeScript interfaces
+    components/        — React components (Dashboard, BucketDetail, admin/*)
+
+k8s/
+  app.sh              — deployment script (dev only)
+  manifests/app/      — Kubernetes manifests for the webapp
+  env/dev/ env/prod/  — environment overlays (secrets + config)
+```

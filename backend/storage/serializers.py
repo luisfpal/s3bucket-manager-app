@@ -1,4 +1,4 @@
-"""Serializers for multi-tenant S3 Bucket Manager."""
+"""Serializers for multi-tenant Bucket Explorer."""
 
 from rest_framework import serializers
 from .models import (

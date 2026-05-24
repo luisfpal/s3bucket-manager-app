@@ -1,3 +1,4 @@
+import { useAutoError } from '../hooks/useAutoMessage'
 /**
  * AuthCallback — OAuth2 Session-to-JWT Bridge
  *
@@ -9,13 +10,13 @@
  * 5. If no tenants → show "not provisioned" message
  */
 
-import { useEffect, useState } from 'react'
+import { useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { authAPI, authStorage } from '../services/api'
 
 function AuthCallback() {
   const navigate = useNavigate()
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useAutoError()
 
   useEffect(() => {
     const exchange = async () => {

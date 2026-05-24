@@ -5,10 +5,13 @@ import { adminAPI, authStorage } from '../../services/api'
 const NAV_ITEMS = [
   { to: '/admin/buckets', label: 'Buckets' },
   { to: '/admin/users', label: 'Users' },
-  { to: '/admin/group-mappings', label: 'Group Mappings' },
   { to: '/admin/uo-mappings', label: 'UO Mappings' },
   { to: '/admin/tenants', label: 'Tenants' },
   { to: '/admin/sync', label: 'Sync' },
+  { to: '/admin/file-rules', label: 'File Rules' },
+  { to: '/admin/file-deviations', label: 'Deviations' },
+  { to: '/admin/file-formats', label: 'File Formats' },
+  { to: '/admin/tenant-docs', label: 'Tenant Docs' },
 ]
 
 function AdminLayout() {
@@ -32,7 +35,7 @@ function AdminLayout() {
     <div className="admin-layout">
       <aside className="admin-sidebar">
         <div className="admin-sidebar-header">
-          <h2>Bucket Manager</h2>
+          <h2>Buckets Explorer</h2>
           <span className="admin-sidebar-subtitle">Admin Panel</span>
         </div>
         <nav className="admin-nav">

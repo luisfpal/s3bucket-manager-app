@@ -1,0 +1,38 @@
+# NFFADI Operational Unit (UO) code mappings.
+#
+# These are STATIC mappings defined by NFFADI management: institution name → UO code.
+# They are the source of truth for assigning uo_code to instrument scientists.
+# Load with: python manage.py load_uo_mappings
+#
+# When to update:
+# - A new NFFADI institution joins the facility → add a new entry
+# - An institution is renamed → update institution_name
+# - The uo_code changes → update uo_code (rare)
+#
+# Note: institution_name matching against the CSV "Institution" column uses
+# case-insensitive substring matching. Be precise enough to avoid false matches.
+
+tenant: NFFADI
+uo_mappings:
+  - institution_name: "CNR - Istituto Officina dei Materiali - Trieste"
+    uo_code: "cnr-iom.ts"
+  - institution_name: "CNR - Istituto di Microelettronica e Microsistemi - Catania"
+    uo_code: "cnr-imm.ct"
+  - institution_name: "CNR - Istituto per lo Studio dei Materiali Nanostrutturati - Bologna"
+    uo_code: "cnr-ismn.bo"
+  - institution_name: "CNR - Istituto di Fotonica e Nanotecnologie - Milano"
+    uo_code: "cnr-ifn.mi"
+  - institution_name: "CNR - Istituto di Fotonica e Nanotecnologie - Trento"
+    uo_code: "cnr-ifn.tn"
+  - institution_name: "CNR - Istituto di Nanotecnologia - Lecce"
+    uo_code: "cnr-nanotec.le"
+  - institution_name: "CNR - Institute for SuPerconductors, INnovative materials, and devices - Napoli"
+    uo_code: "cnr-spin.na"
+  - institution_name: "CNR - Istituto di Struttura della Materia - Roma"
+    uo_code: "cnr-ism.rm"
+  - institution_name: "AREA - Istituto Ricerca e Innovazione Tecnologica (Trieste)"
+    uo_code: "area-rit"
+  - institution_name: "POLIMI - POLIFAB (Milano)"
+    uo_code: "polifab"
+  - institution_name: "UNIMI - Dipartimento di Fisica \"Aldo Pontremoli\" (Milano)"
+    uo_code: "unimi"

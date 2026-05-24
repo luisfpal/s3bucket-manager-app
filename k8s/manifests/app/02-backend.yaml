@@ -31,15 +31,25 @@ spec:
             - sh
             - -c
             - |
-              until pg_isready -h django-postgres -U djangouser; do
+              until pg_isready -h django-postgres -U djangouser -d djangodb; do
                 echo "Waiting for postgres..."
                 sleep 2
               done
               echo "PostgreSQL is ready!"
+          # wait-for-postgres: polls pg_isready every 2s — minimal CPU, tiny memory footprint.
+          # DEV:  requests=50m/64Mi,  limits=100m/128Mi  (current — correct, no change needed)
+          # PROD: requests=50m/64Mi,  limits=200m/256Mi  (loop is CPU-idle; no scaling required)
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "100m"
 
       containers:
         - name: backend
-          image: ghcr.io/luisfpal/bucket-explorer-backend:latest
+          image: ghcr.io/luisfpal/buckets-explorer-backend:latest
           imagePullPolicy: Always
           envFrom:
             - configMapRef:
@@ -70,20 +80,37 @@ spec:
                 secretKeyRef:
                   name: backend-secret
                   key: rgwsquared-password
+            - name: DJANGO_SUPERUSER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: backend-secret
+                  key: django-superuser-password
+                  optional: true
           ports:
             - containerPort: 8000
               name: http
+          # Django/gunicorn: CPU-bound (ORM queries, JSON serialization, OIDC token validation).
+          # Each gunicorn worker handles one request at a time; more workers = more concurrency.
+          # Worker formula: (2 × CPU cores available) + 1. Increase --workers in Containerfile
+          # CMD to match the PROD CPU limit (e.g. --workers 4 for 3 CPU, --workers 7 for 3 CPU max).
+          #
+          # DEV:  requests=250m/512Mi, limits=1000m/1Gi  → 2 workers; can burst to 1 CPU on idle node
+          # PROD: requests=500m/1Gi,   limits=3000m/4Gi  → 4+ workers; quota: ~3/8 CPU, ~4/32Gi memory
+          #       Also consider: --worker-class gthread --threads 2  for better IO concurrency
           resources:
             requests:
-              memory: "256Mi"
+              memory: "512Mi"
               cpu: "250m"
             limits:
-              memory: "512Mi"
-              cpu: "500m"
+              memory: "1Gi"
+              cpu: "1000m"
           livenessProbe:
             httpGet:
               path: /api/health/
               port: 8000
+              httpHeaders:
+                - name: Host
+                  value: backend-service
             initialDelaySeconds: 60
             periodSeconds: 10
             timeoutSeconds: 5
@@ -92,6 +119,9 @@ spec:
             httpGet:
               path: /api/health/
               port: 8000
+              httpHeaders:
+                - name: Host
+                  value: backend-service
             initialDelaySeconds: 30
             periodSeconds: 5
 

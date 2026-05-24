@@ -22,6 +22,15 @@ RUN mkdir -p /app/staticfiles
 EXPOSE 8000
 
 # Start app with non-interactive management commands and gunicorn.
+#
+# Gunicorn worker sizing:
+#   Formula: (2 × available_vCPU) + 1
+#   DEV  (1 CPU limit):  --workers 2  ← current, correct
+#   PROD (3 CPU limit):  --workers 7  (or --workers 4 as conservative start)
+#   PROD tip: add --worker-class gthread --threads 2 for IO-heavy workloads
+#             (auth token validation, S3 API calls, RGWSquared calls are all IO-bound)
 CMD python manage.py migrate --noinput && \
+    python manage.py load_uo_mappings && \
+    python manage.py ensure_superuser && \
     python manage.py collectstatic --noinput && \
     gunicorn wsgi:application --bind 0.0.0.0:8000 --workers 2 --timeout 120

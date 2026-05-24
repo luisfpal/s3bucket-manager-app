@@ -1,6 +1,6 @@
 """Views package — split by domain for maintainability."""
 
-from .auth import exchange_token, current_user, select_tenant, health_check
+from .auth import exchange_token, current_user, select_tenant, health_check, tenant_document
 from .buckets import BucketViewSet
 from .admin import (
     admin_login,
@@ -10,6 +10,7 @@ from .admin import (
     admin_delete_file,
     admin_users,
     admin_tenants,
+    admin_tenant_activation,
     admin_group_mappings,
     admin_group_mapping_delete,
     admin_available_tenants,
@@ -17,6 +18,13 @@ from .admin import (
     admin_sync_refresh,
     admin_sync_upload_csv,
     admin_sync_update_structure,
+    admin_create_tenant,
+    admin_membership_files,
+    admin_file_name_rules,
+    admin_file_name_rule_detail,
+    admin_file_deviations,
+    admin_tenant_document,
+    admin_file_formats,
 )
 
 __all__ = [
@@ -24,6 +32,7 @@ __all__ = [
     "current_user",
     "select_tenant",
     "health_check",
+    "tenant_document",
     "BucketViewSet",
     "admin_login",
     "admin_permissions",
@@ -32,6 +41,7 @@ __all__ = [
     "admin_delete_file",
     "admin_users",
     "admin_tenants",
+    "admin_tenant_activation",
     "admin_group_mappings",
     "admin_group_mapping_delete",
     "admin_available_tenants",
@@ -39,4 +49,11 @@ __all__ = [
     "admin_sync_refresh",
     "admin_sync_upload_csv",
     "admin_sync_update_structure",
+    "admin_create_tenant",
+    "admin_membership_files",
+    "admin_file_name_rules",
+    "admin_file_name_rule_detail",
+    "admin_file_deviations",
+    "admin_tenant_document",
+    "admin_file_formats",
 ]

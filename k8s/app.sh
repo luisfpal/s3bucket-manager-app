@@ -4,22 +4,21 @@
 # ==============================================================================
 #
 # PURPOSE:
-#   Manages the S3 Bucket Manager webapp in the bucket-explorer namespace.
+#   Manages the Bucket Explorer webapp in the bucket-explorer namespace.
 #   This is the APPLICATION layer — it assumes Authentik is already running
-#   and reachable (deployed by infra.sh or provided externally in production).
+#   and reachable (deployed by infra.sh, or running locally for testing).
 #
+#   Both scripts are self-contained and do not call each other.
 #   The companion script infra.sh manages the Authentik infrastructure layer
 #   (authentik-bucket-explorer namespace) independently.
-#   These two scripts are self-contained and do not call each other.
 #
 # USAGE:
 #   Full webapp deploy:
-#     ./app.sh deploy --env dev --rebuild    # build images, push to GHCR, deploy
-#     ./app.sh deploy --env dev              # deploy only (use existing images)
-#     ./app.sh deploy --env prod             # production deploy with safety checks
+#     ./app.sh deploy --rebuild    # build images, push to GHCR, deploy
+#     ./app.sh deploy              # deploy only (use existing images)
 #
-#   Standalone namespace creation (production: namespace pre-created by infra team):
-#     ./app.sh deploy-namespace [--env dev|prod]
+#   Standalone namespace creation:
+#     ./app.sh deploy-namespace
 #
 #   Inner-loop rebuilds (no manifest re-apply — just build, push, restart):
 #     ./app.sh backend       # Rebuild + redeploy backend  (~60s)
@@ -47,11 +46,10 @@
 #
 #   deploy-namespace:
 #     Idempotent: kubectl apply 00-namespace.yaml
-#     In production: infra team pre-creates the namespace, then hands it to app devs.
-#     In dev: called automatically by 'deploy'.
+#     Called automatically by 'deploy'.
 #
 #   backend/frontend/all:
-#     1. podman build -t ghcr.io/luisfpal/bucket-explorer-<component>:latest
+#     1. podman build -t ghcr.io/luisfpal/buckets-explorer-<component>:latest
 #     2. ghcr_login + podman push (packages are public; K3s pulls without credentials)
 #     3. kubectl rollout restart deployment/<component>  -n bucket-explorer
 #     4. kubectl rollout status (waits; imagePullPolicy: Always fetches new image)
@@ -93,14 +91,13 @@ TUNNEL_KUBECONFIG="/tmp/k3s-tunnel-kubeconfig.yaml"
 
 GHCR_OWNER="luisfpal"
 REGISTRY="ghcr.io/${GHCR_OWNER}"
-BACKEND_IMAGE="${REGISTRY}/bucket-explorer-backend:latest"
-FRONTEND_IMAGE="${REGISTRY}/bucket-explorer-frontend:latest"
+BACKEND_IMAGE="${REGISTRY}/buckets-explorer-backend:latest"
+FRONTEND_IMAGE="${REGISTRY}/buckets-explorer-frontend:latest"
 
 # Source local secrets (GHCR_TOKEN for registry auth). k8s/.env is gitignored.
 # See k8s/.env.example for the expected format and token creation instructions.
 [ -f "${SCRIPT_DIR}/.env" ] && source "${SCRIPT_DIR}/.env"
 
-DEPLOY_ENV="${DEPLOY_ENV:-dev}"
 ENV_DIR=""
 APP_SECRETS_FILE=""
 BACKEND_CONFIG_FILE=""
@@ -183,16 +180,11 @@ ensure_kubeconfig() {
 }
 
 # ==============================================================================
-# Environment file selection + production safety gates
+# Environment file selection
 # ==============================================================================
 
 resolve_app_environment_files() {
-    case "$DEPLOY_ENV" in
-        dev|prod) ;;
-        *) fail "Unsupported --env '$DEPLOY_ENV' (expected: dev|prod)" ;;
-    esac
-
-    ENV_DIR="$ENV_BASE_DIR/$DEPLOY_ENV"
+    ENV_DIR="$ENV_BASE_DIR/dev"
     APP_SECRETS_FILE="$ENV_DIR/app-secrets.yaml"
     BACKEND_CONFIG_FILE="$ENV_DIR/backend-config.yaml"
 
@@ -208,24 +200,6 @@ resolve_app_environment_files() {
 
     if [[ "$APP_SECRETS_FILE" == *.local.yaml ]] || [[ "$BACKEND_CONFIG_FILE" == *.local.yaml ]]; then
         info "Using local overrides from $ENV_DIR (*.local.*)"
-    fi
-}
-
-run_production_safety_checks() {
-    if [ "$DEPLOY_ENV" != "prod" ]; then
-        return 0
-    fi
-
-    grep -q "REPLACE_WITH_PROD_" "$APP_SECRETS_FILE"    && fail "Prod app-secrets still has placeholders: $APP_SECRETS_FILE"
-    grep -q "REPLACE_WITH_PROD_" "$BACKEND_CONFIG_FILE" && fail "Prod config still has placeholders: $BACKEND_CONFIG_FILE"
-
-    grep -q 'DJANGO_DEBUG: "True"' "$BACKEND_CONFIG_FILE"                 && fail "Prod config has DJANGO_DEBUG=True"
-    grep -q 'DJANGO_ALLOWED_HOSTS: "\*"' "$BACKEND_CONFIG_FILE"           && fail "Prod config has wildcard DJANGO_ALLOWED_HOSTS"
-    grep -q 'S3_VERIFY_SSL: "False"' "$BACKEND_CONFIG_FILE"               && fail "Prod config has S3_VERIFY_SSL=False"
-    grep -q 'AUTHENTIK_EXTERNAL_URL: "http://localhost:9000"' "$BACKEND_CONFIG_FILE" && \
-        fail "Prod config uses localhost Authentik URL"
-    if [ -n "${PUBLIC_APP_URL:-}" ] && [[ "$PUBLIC_APP_URL" == *"localhost"* ]]; then
-        fail "PUBLIC_APP_URL points to localhost in prod: $PUBLIC_APP_URL"
     fi
 }
 
@@ -284,12 +258,8 @@ prepare_frontend_generated_dirs() {
 
 deploy_namespace() {
     # Create the bucket-explorer namespace only.
-    #
-    # In production: the infrastructure team runs this step before handing the
-    # namespace to the application team (kubectl apply is idempotent — safe to
-    # run even if the namespace already exists).
-    #
-    # In dev: called automatically as the first step of 'deploy'.
+    # Called automatically as the first step of 'deploy'.
+    # kubectl apply is idempotent — safe to run even if the namespace already exists.
     resolve_app_environment_files
     ensure_kubeconfig
     step "Creating app namespace ($NAMESPACE)"
@@ -302,7 +272,7 @@ deploy_namespace() {
 # ==============================================================================
 
 apply_app_manifests_for_env() {
-    step "Deploying webapp (env=$DEPLOY_ENV, ns=$NAMESPACE)"
+    step "Deploying webapp to $NAMESPACE"
 
     # Step 1: namespace (idempotent — safe even if it already exists)
     kubectl apply -f "$APP_MANIFESTS_DIR/00-namespace.yaml"
@@ -326,6 +296,24 @@ apply_app_manifests_for_env() {
     kubectl apply -f "$APP_MANIFESTS_DIR/03-frontend.yaml"
     wait_for_rollout "deployment/frontend" "300s" "2" "$NAMESPACE"
 
+    # Step 6: Dev Ingress (catch-all) — applied if IngressClass haproxy-4 exists in the cluster.
+    # 04-ingress.dev.yaml accepts any Host header so localhost:3000 works via the HAProxy
+    # NodePort while OAuth2 redirect_uri (http://localhost:3000/...) still matches Authentik.
+    #
+    # 04-ingress.yaml is a production-specific Ingress — it is not applied here.
+    local dev_ingress_file="$APP_MANIFESTS_DIR/04-ingress.dev.yaml"
+    if [ -f "$dev_ingress_file" ]; then
+        local ingress_class
+        ingress_class=$(grep 'ingressClassName:' "$dev_ingress_file" 2>/dev/null | awk '{print $2}')
+        if [ -n "$ingress_class" ] && kubectl get ingressclass "$ingress_class" &>/dev/null 2>&1; then
+            kubectl apply -f "$dev_ingress_file"
+            success "Dev Ingress applied (catch-all via haproxy-4, enables localhost:3000 through Ingress)"
+        else
+            info "Dev Ingress skipped — IngressClass '${ingress_class:-unknown}' not in this cluster"
+            info "  Use './app.sh access' (direct port-forward) to reach the app"
+        fi
+    fi
+
     success "Webapp manifests applied"
 }
 
@@ -340,19 +328,15 @@ run_deploy() {
     while [ $# -gt 0 ]; do
         case "$1" in
             -h|--help)
-                echo "Usage: ./app.sh deploy [--env dev|prod] [--rebuild] [--skip-authentik-check]"
+                echo "Usage: ./app.sh deploy [--rebuild] [--skip-authentik-check]"
                 echo ""
                 echo "  --rebuild              Build and push images to GHCR before deploying"
                 echo "  --skip-authentik-check Skip the Authentik readiness check"
-                echo "                         Use when Authentik is known to be running externally"
+                echo "                         Use when Authentik is known to be running"
                 return 0
                 ;;
             --rebuild)
                 rebuild=true
-                ;;
-            --env)
-                [ -z "${2:-}" ] && fail "--env requires an argument: dev|prod"
-                DEPLOY_ENV="$2"; shift
                 ;;
             --skip-authentik-check)
                 skip_authentik_check=true
@@ -363,20 +347,19 @@ run_deploy() {
     done
 
     resolve_app_environment_files
-    run_production_safety_checks
     ensure_kubeconfig
 
-    # Guard: warn if Authentik infra is not found (dev only — only if INFRA_NAMESPACE is set
-    # and accessible). In production, Authentik is external and this check is skipped.
+    # Guard: warn if Authentik infra is not found — the backend init container will wait
+    # for it anyway, but this gives early feedback before manifest application starts.
     if [ "$skip_authentik_check" = false ] && [ -n "${INFRA_NAMESPACE:-}" ]; then
         if ! kubectl get deployment authentik-server -n "$INFRA_NAMESPACE" &>/dev/null 2>&1; then
             warn "Authentik not found in '$INFRA_NAMESPACE' — deploy the infra layer first:"
-            warn "  ./infra.sh deploy --env $DEPLOY_ENV"
-            warn "Continuing anyway; Authentik is assumed to be available externally."
+            warn "  ./infra.sh deploy"
+            warn "Continuing anyway — the backend init container will wait for Authentik."
         fi
     fi
 
-    step "Webapp deploy start (env=$DEPLOY_ENV)"
+    step "Webapp deploy start"
 
     if [ "$rebuild" = true ]; then
         build_component_image backend
@@ -387,7 +370,15 @@ run_deploy() {
 
     apply_app_manifests_for_env
 
-    success "Webapp deploy completed (env=$DEPLOY_ENV)"
+    if [ "$rebuild" = true ]; then
+        info "Restarting app deployments to pull rebuilt :latest images..."
+        kubectl rollout restart deployment/backend -n "$NAMESPACE"
+        rollout_with_retry "deployment/backend" "180s" "2" "$NAMESPACE"
+        kubectl rollout restart deployment/frontend -n "$NAMESPACE"
+        rollout_with_retry "deployment/frontend" "180s" "2" "$NAMESPACE"
+    fi
+
+    success "Webapp deploy completed"
 }
 
 # ==============================================================================
@@ -562,25 +553,65 @@ setup_access() {
 
     export KUBECONFIG="$TUNNEL_KUBECONFIG"
 
-    # 3. Frontend port-forward (bucket-explorer namespace)
-    #    App devs access the webapp through this port.
+    # 3. Frontend access.
+    # If 04-ingress.dev.yaml (catch-all Ingress) is deployed and haproxy-4 IngressClass
+    # exists: forward localhost:3000 → HAProxy Ingress NodePort. Traffic exercises the
+    # full production-like chain (HAProxy → nginx → backend) while OAuth2 still works
+    # because the catch-all Ingress accepts any Host header (including localhost:3000).
+    # If no dev Ingress is available: direct port-forward to frontend-service (always works).
+    local ingress_nodeport=""
+    local dev_ingress_name="bucket-explorer-dev"
+    if kubectl get ingress "$dev_ingress_name" -n "$NAMESPACE" &>/dev/null 2>&1; then
+        local ic
+        ic=$(kubectl get ingress "$dev_ingress_name" -n "$NAMESPACE" \
+            -o jsonpath='{.spec.ingressClassName}' 2>/dev/null || true)
+        if [ -n "$ic" ] && kubectl get ingressclass "$ic" &>/dev/null 2>&1; then
+            ingress_nodeport=$(kubectl get svc -n haproxy-ingress \
+                -o jsonpath='{.items[0].spec.ports[?(@.port==80)].nodePort}' 2>/dev/null || true)
+        fi
+    fi
+
     if ! ss -tlnp 2>/dev/null | grep -q ":3000 "; then
-        info "Starting frontend port-forward (:3000 → $NAMESPACE/frontend-service:80)..."
-        nohup kubectl port-forward svc/frontend-service 3000:80 -n "$NAMESPACE" \
-            > /tmp/pf-frontend.log 2>&1 &
-        sleep 1
-        if ss -tlnp 2>/dev/null | grep -q ":3000 "; then
-            success "Frontend :3000 → active"
+        if [ -n "$ingress_nodeport" ]; then
+            # Dev Ingress available: tunnel localhost:3000 → HAProxy NodePort.
+            # 04-ingress.dev.yaml is a catch-all so localhost works and the OAuth2
+            # redirect_uri http://localhost:3000/... matches the Authentik config.
+            info "Starting frontend tunnel (:3000 → kube01:$ingress_nodeport via haproxy-4 catch-all Ingress)..."
+            nohup ssh -fNL "3000:192.168.132.10:$ingress_nodeport" \
+                -o StrictHostKeyChecking=no \
+                -o ExitOnForwardFailure=yes \
+                root@192.168.132.10 \
+                > /tmp/pf-frontend.log 2>&1 &
+            sleep 1
+            if ss -tlnp 2>/dev/null | grep -q ":3000 "; then
+                success "Frontend :3000 → HAProxy Ingress (haproxy-4) → $NAMESPACE/frontend-service"
+            else
+                warn "Ingress tunnel failed — falling back to direct frontend-service port-forward"
+                nohup kubectl port-forward svc/frontend-service 3000:80 -n "$NAMESPACE" \
+                    >> /tmp/pf-frontend.log 2>&1 &
+                sleep 1
+                ss -tlnp 2>/dev/null | grep -q ":3000 " \
+                    && success "Frontend :3000 → active (direct, Ingress unavailable)" \
+                    || warn "Frontend port-forward failed — check /tmp/pf-frontend.log"
+            fi
         else
-            warn "Frontend port-forward may have failed — check /tmp/pf-frontend.log"
+            # No dev Ingress: direct port-forward to frontend-service ClusterIP.
+            info "Starting frontend port-forward (:3000 → $NAMESPACE/frontend-service:80)..."
+            nohup kubectl port-forward svc/frontend-service 3000:80 -n "$NAMESPACE" \
+                > /tmp/pf-frontend.log 2>&1 &
+            sleep 1
+            if ss -tlnp 2>/dev/null | grep -q ":3000 "; then
+                success "Frontend :3000 → active"
+            else
+                warn "Frontend port-forward may have failed — check /tmp/pf-frontend.log"
+            fi
         fi
     else
         success "Frontend :3000 already running"
     fi
 
-    # 4. Authentik port-forward (dev only — only when INFRA_NAMESPACE is set and accessible).
-    #    Required in dev: the browser follows OAuth2 redirects to localhost:9000 (Authentik).
-    #    In production, Authentik is external and has a real public URL — no port-forward needed.
+    # 4. Authentik port-forward — required for the browser to follow OAuth2 redirects
+    #    to localhost:9000. Only started when INFRA_NAMESPACE is set and accessible.
     if [ -n "${INFRA_NAMESPACE:-}" ]; then
         if ! ss -tlnp 2>/dev/null | grep -q ":9000 "; then
             info "Starting Authentik port-forward (:9000 → $INFRA_NAMESPACE/authentik-service:9000)..."
@@ -665,7 +696,7 @@ run_cleanup() {
     success "Webapp cleanup complete!"
     echo ""
     echo "  To verify:  kubectl get all -n $NAMESPACE"
-    echo "  To redeploy: ./app.sh deploy --env dev --rebuild"
+    echo "  To redeploy: ./app.sh deploy --rebuild"
     echo ""
 }
 
@@ -758,10 +789,10 @@ usage() {
     echo "  Usage: ./app.sh <command> [args]"
     echo ""
     echo "  Deployment:"
-    echo "    deploy [--env dev|prod] [--rebuild] [--skip-authentik-check]"
+    echo "    deploy [--rebuild] [--skip-authentik-check]"
     echo "                   Full webapp deploy (namespace → secrets → postgres → backend → frontend)"
-    echo "    deploy-namespace [--env dev|prod]"
-    echo "                   Create bucket-explorer namespace only (production pre-step)"
+    echo "    deploy-namespace"
+    echo "                   Create bucket-explorer namespace only"
     echo ""
     echo "  Inner-loop rebuilds (no manifest re-apply):"
     echo "    backend        Rebuild + push backend image → GHCR; restart deployment (~60s)"
@@ -780,10 +811,10 @@ usage() {
     echo "  Images     : $BACKEND_IMAGE"
     echo "               $FRONTEND_IMAGE"
     echo ""
-    echo "  Environment overlays:"
-    echo "    k8s/env/{dev,prod}/app-secrets.yaml      — backend-secret"
-    echo "    k8s/env/{dev,prod}/backend-config.yaml   — backend ConfigMap"
-    echo "    Optional local overrides (gitignored)    : *.local.yaml"
+    echo "  Environment overlays (k8s/env/dev/):"
+    echo "    app-secrets.yaml      — backend-secret"
+    echo "    backend-config.yaml   — backend ConfigMap"
+    echo "    Optional local overrides (gitignored): *.local.yaml"
     echo ""
     echo "  Companion script: ./infra.sh  (manages Authentik in $INFRA_NAMESPACE)"
     echo ""
@@ -797,14 +828,8 @@ case "$COMMAND" in
         run_deploy "$@"
         ;;
     deploy-namespace)
-        # Parse optional --env flag before calling deploy_namespace
-        while [ $# -gt 0 ]; do
-            case "$1" in
-                --env) [ -z "${2:-}" ] && fail "--env requires: dev|prod"; DEPLOY_ENV="$2"; shift ;;
-                *) fail "Unknown argument: $1" ;;
-            esac
-            shift
-        done
+        [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ] && {
+            echo "Usage: ./app.sh deploy-namespace"; exit 0; }
         deploy_namespace
         ;;
     backend)

@@ -12,7 +12,11 @@ interface NavbarProps {
 
 function Navbar({ user }: NavbarProps) {
   const navigate = useNavigate()
-  const activeTenant = authAPI.getActiveTenant()
+  const storedTenant = authAPI.getActiveTenant()
+  const freshTenant = user?.tenants?.find(t => t.id === storedTenant?.id)
+  const activeTenant = (freshTenant && storedTenant)
+    ? { ...storedTenant, document: freshTenant.document }
+    : storedTenant
 
   const handleLogout = () => {
     authAPI.logout()
@@ -31,7 +35,7 @@ function Navbar({ user }: NavbarProps) {
       <div className="navbar-container">
         <div className="navbar-brand">
           <Link to="/dashboard" className="navbar-logo">
-            Bucket Manager
+            Buckets Explorer
           </Link>
           {activeTenant && (
             <span className="navbar-tenant" style={{
@@ -54,6 +58,9 @@ function Navbar({ user }: NavbarProps) {
           )}
           <Link to="/dashboard" className="navbar-link">Dashboard</Link>
           <Link to="/profile" className="navbar-link">Profile</Link>
+          {activeTenant?.document?.is_visible && activeTenant.document.tab_name && (
+            <Link to="/guide" className="navbar-link">{activeTenant.document.tab_name}</Link>
+          )}
           {user?.is_admin && (
             <Link to="/admin" className="navbar-link" style={{ color: '#f39c12' }}>Admin</Link>
           )}

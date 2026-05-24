@@ -86,8 +86,6 @@ This project depends on **RGWSquared**, an internal microservice developed at [A
 
 RGWSquared is essentially a service wrapper around **Ceph RGW**: RADOS Gateway, the Ceph component that exposes object storage through S3-compatible and Swift-compatible APIs. Ceph stores the objects; RGWSquared handles the higher-level policy layer that maps users, collaborations, proposals, and bucket permissions onto RGW-managed storage.
 
-In this application, RGWSquared is the source of truth for project bucket permissions. It synchronizes with external research-collaboration systems that track proposal/project state, then uses that state to determine which users should have read-only or read-write access to the corresponding Ceph buckets. Django imports that policy state and presents it through the web UI while keeping local bucket metadata, sharing, and audit behavior in its own database.
-
 RGWSquared is currently private because it is tightly coupled to ORFEO-specific infrastructure and collaboration workflows. The integration in this repository should therefore be treated as a deployment dependency and boundary, not as a complete public specification of the microservice. A future deployment could replace RGWSquared by implementing the same essential pipeline: map collaboration/project state to users, buckets, and Ceph RGW access policies.
 
 ## Further Documentation
@@ -103,12 +101,13 @@ RGWSquared is currently private because it is tightly coupled to ORFEO-specific 
 
 This project was developed and validated in the **[Stencil](https://gitlab.com/area7/datacenter/codes/stencil/docs/-/tree/main/docs) virtual datacenter**: a virtualized multi-node environment developed by AREA Science Park to approximate production infrastructure on a single physical machine. Stencil runs real datacenter software inside KVM virtual machines — a K3s Kubernetes cluster, a Ceph distributed storage cluster with S3-compatible RGW, FreeIPA for DNS and identity, and supporting networking services. Credit for the Stencil infrastructure goes to the AREA Science Park team.
 
-The application is therefore designed around production-like boundaries: containers are built and pushed to a registry, Kubernetes pulls those images onto cluster nodes, Django stores application state in PostgreSQL, and object data lives outside the app namespace in Ceph RGW. Concrete hostnames, IP addresses, credentials, and local tunnel details are environment-specific and should be supplied through `k8s/env/<env>/` templates or ignored local overrides.
-
 ## Quick Start
 
 > [!WARNING]
 > ⚠️ **Environment-specific scripts:** [k8s/infra.sh](k8s/infra.sh) and [k8s/app.sh](k8s/app.sh) are calibrated for the development K3s cluster and registry defaults. Review namespace, node addressing, kubeconfig, registry, and port-forward assumptions before reusing them elsewhere.
+
+> [!NOTE]
+> **Setting up the environment for the first time?** The commands below assume a provisioned K3s cluster, Ceph RGW endpoint, and Authentik identity provider. If you are starting from scratch, follow the [Development Environment Setup Guide](docs/dev-environment-setup.md) first.
 
 ### Prerequisites
 
@@ -135,10 +134,8 @@ This creates `frontend/node_modules/` and `frontend/dist/`. The deployment scrip
 
 ```bash
 cd k8s
-./app.sh deploy --env dev --rebuild
+./app.sh deploy --rebuild
 ```
-
-There is no root-level JavaScript workspace for this project; all Node dependencies live under `frontend/`.
 
 ### Deploy
 
@@ -148,19 +145,9 @@ export KUBECONFIG=/tmp/k3s-tunnel-kubeconfig.yaml
 
 # 2. Run the deployment from the repository checkout
 cd k8s
-./infra.sh deploy --env dev
-./app.sh deploy --env dev --rebuild
+./infra.sh deploy
+./app.sh deploy --rebuild
 ```
-
-The scripts will:
-
-1. Build backend and frontend container images with `podman`
-2. Push images to the configured registry
-3. Deploy Authentik infrastructure through `infra.sh`
-4. Apply app environment overlays and manifests through `app.sh`
-5. Wait for pods and rollouts to become healthy
-6. Auto-configure the Authentik OAuth2 provider in development
-7. Print access instructions for the selected environment
 
 > **Trouble?** Run `./infra.sh check` to diagnose infrastructure prerequisites such as node reachability, Kubernetes API access, registry access, and Ceph RGW health.
 
@@ -208,13 +195,14 @@ cd k8s
 
 ### Script Reference
 
-| Script                    | Purpose                       | When to use                          |
-| ------------------------- | ----------------------------- | ------------------------------------ |
-| `infra.sh deploy --env dev` | Deploy Authentik infrastructure |
-| `app.sh deploy --env dev --rebuild` | Build/push/deploy the webapp |
-| `app.sh backend` / `app.sh frontend` | Fast component rebuild loop |
-| `infra.sh check` | Infrastructure health check |
-| `app.sh cleanup` / `infra.sh cleanup` | Tear down app/infra namespaces |
+| Script | Purpose | When to use |
+| --- | --- | --- |
+| `infra.sh deploy` | Deploy Authentik infrastructure | First deploy; after `infra.sh cleanup` |
+| `app.sh deploy --rebuild` | Build, push, and deploy the webapp | First deploy; after manifest changes |
+| `app.sh backend` / `app.sh frontend` | Fast component rebuild loop | Code-only changes — no manifest re-apply |
+| `infra.sh check` | Full infrastructure health check | Before deploy; when anything seems broken |
+| `app.sh cleanup` / `infra.sh cleanup` | Tear down app/infra namespaces | Starting fresh or resetting the environment |
+| `ci.sh install` | Install GitHub Actions ARC runner in K3s | Once per cluster; enables the CI/CD pipeline |
 
 ### The Development Loop
 
@@ -236,20 +224,6 @@ cd k8s
 export KUBECONFIG=/tmp/k3s-tunnel-kubeconfig.yaml
 kubectl apply -f manifests/app/02-backend.yaml
 ./app.sh restart backend
-```
-
-**What `./app.sh backend` does under the hood** (manual steps for reference):
-
-```bash
-# 1. Build container image
-podman build -t ghcr.io/luisfpal/buckets-explorer-backend:latest -f backend/Containerfile backend/
-
-# 2. Push to the configured registry
-podman push ghcr.io/luisfpal/buckets-explorer-backend:latest
-
-# 3. Restart the deployment (picks up new image)
-kubectl rollout restart deployment/backend -n bucket-explorer
-kubectl rollout status deployment/backend -n bucket-explorer --timeout=120s
 ```
 
 ### Start of Day / After Reboot
@@ -319,7 +293,7 @@ s3bucket_manager_app/
 │   ├── manifests/
 │   │   ├── infra/                  # Authentik namespace resources
 │   │   └── app/                    # Webapp namespace resources
-│   ├── env/                        # dev/prod config + secret templates
+│   ├── env/                        # dev config + secret templates
 │   ├── configure_authentik.py      # Auto-configure OAuth2 provider
 │   ├── infra.sh                    # Authentik infra operator script
 │   └── app.sh                      # Webapp deploy + dev loop
@@ -330,37 +304,17 @@ s3bucket_manager_app/
 └── README.md                       # This file
 ```
 
-## Key Design Decisions
-
-### Why external Ceph RGW?
-
-The target deployment uses a **Ceph cluster** providing S3-compatible storage through RGW. Object data is intentionally outside the application namespace: Kubernetes runs the web app and databases, while Ceph owns durable object storage.
-
-Since Ceph RGW speaks the **S3 protocol**, Django uses `boto3` through generic `S3_*` settings. Changing the backing S3-compatible endpoint is a configuration change, not a code rewrite.
-
-### Why S3_* instead of MINIO_*?
-
-Settings use a generic `S3_` prefix to be backend-agnostic. Tomorrow you could point this at AWS S3 or any other S3-compatible service by changing environment variables. The code doesn't need to know or care.
-
-### Why the BFF pattern?
-
-The Backend-for-Frontend pattern means nginx serves both the React app and proxies API calls. This keeps everything on the same origin, so session cookies (needed during OAuth2 handshake) work without CORS complexity.
-
-### Why configurable TLS verification?
-
-Development Ceph RGW deployments may use self-signed TLS certificates. Production should add the trusted CA certificate to the runtime image or platform trust store and set `S3_VERIFY_SSL=True`.
-
 ## Operations Notes
 
 The public repository documents the portable deployment shape. Environment-specific hostnames, IP addresses, tunnel sockets, dashboard credentials, and break-glass Ceph procedures belong in the operator runbook for the target infrastructure.
 
-For a normal development or staging deployment, start with the app/infra scripts:
+For a normal development deployment, start with the app/infra scripts:
 
 ```bash
 cd k8s
 ./infra.sh check
-./infra.sh deploy --env dev
-./app.sh deploy --env dev --rebuild
+./infra.sh deploy
+./app.sh deploy --rebuild
 ./app.sh access
 ```
 
@@ -378,7 +332,7 @@ kubectl patch configmap backend-config -n bucket-explorer --type merge \
 kubectl rollout restart deployment/backend -n bucket-explorer
 ```
 
-> **Note:** `k8s/manifests/app/02-backend.yaml` references environment overlay resources. A full `./app.sh deploy --env <env>` reapplies overlay defaults.
+> **Note:** `k8s/manifests/app/02-backend.yaml` references environment overlay resources. A full `./app.sh deploy` reapplies overlay defaults. Set `S3_VERIFY_SSL=False` in the dev overlay if Ceph RGW uses a self-signed certificate.
 
 ### General Troubleshooting
 
@@ -386,22 +340,12 @@ kubectl rollout restart deployment/backend -n bucket-explorer
 | --------------------------------------- | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
 | `kubectl` hangs or connection refused | Kubeconfig, tunnel, or API reachability issue                        | `./infra.sh check`                                                                 |
 | Backend CrashLoopBackOff                | PostgreSQL, Authentik, or required secret missing                    | `kubectl logs <pod> -n bucket-explorer --all-containers`                          |
-| Login redirects fail                    | Authentik provider/client not configured for the active callback URL | Re-run `./infra.sh configure --env <env>` and inspect `configure_authentik.py` logs |
+| Login redirects fail                    | Authentik provider/client not configured for the active callback URL | Re-run `./infra.sh configure` and inspect `configure_authentik.py` logs |
 | S3 `AccessDenied`                     | RGWSquared returned stale/invalid transient keys or bucket policy is stale | Run the admin sync flow and check RGWSquared `structureInfo`                |
 | S3 connection errors                    | Ceph RGW endpoint, TLS, or network failure                           | Check `S3_ENDPOINT`, `S3_VERIFY_SSL`, and Ceph RGW health                      |
 | Frontend cannot call the API            | nginx cannot resolve or reach `backend-service`                    | Inspect frontend pod logs and `frontend/nginx.conf`                              |
 
-### Stencil Deployment Shape
-
-The Stencil validation environment used a virtualized multi-node topology:
-
-| Role                  | Count               | Responsibility                            |
-| --------------------- | ------------------- | ----------------------------------------- |
-| K3s server nodes      | 3                   | Kubernetes API, scheduler, workloads      |
-| Ceph service nodes    | 3                   | RGW, monitoring, metadata services        |
-| Ceph OSD nodes        | 3                   | Durable object storage                    |
-| Registry              | 1                   | Container image distribution to K3s nodes |
-| Identity/DNS services | Environment-managed | OAuth2/OIDC and stable service discovery  |
+For the complete virtual datacenter topology and hardware requirements, see the [Development Environment Overview](docs/dev-environment-overview.md).
 
 ## Credentials
 
@@ -414,15 +358,13 @@ Use Kubernetes Secrets only. No literal credentials should be documented in this
 | RGWSquared credentials     | Backend Kubernetes Secret     |
 | Django database credential | Backend Kubernetes Secret     |
 
-Set real values in `k8s/env/<env>/*.local.yaml` (gitignored) or your external secret manager.
+Set real values in `k8s/env/dev/*.local.yaml` (gitignored) or your external secret manager.
 
 ## Reproducibility
 
 The repository stores source code, Kubernetes templates, dependency manifests, and lockfiles. Frontend generated artifacts are reproducible from `frontend/package-lock.json` with `npm ci` and `npm run build`; `k8s/app.sh` runs those commands automatically when it needs the generated directories for deployment.
 
 Backend dependencies are pinned in `backend/requirements.txt` and installed by `backend/Containerfile`. Frontend dependencies are locked in `frontend/package-lock.json`.
-
-`npm run build` currently reports a large JavaScript chunk because the NeXus/H5Web viewer is bundled into the main SPA. A later performance pass should lazy-load the file viewer if initial page weight becomes a deployment concern.
 
 ## License
 

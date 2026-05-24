@@ -1,0 +1,38 @@
+# Development Ingress — routes all traffic through the haproxy-4 Ingress controller
+# regardless of the Host header. This lets localhost:3000 work via port-forward to the
+# Ingress NodePort, exercising the full HAProxy → nginx → backend chain in dev.
+#
+# How it differs from 04-ingress.yaml (production):
+#   Production: host: buckets-explorer.areasciencepark.it  — hostname-specific, requires
+#               DNS to resolve and TLS to be configured by admins.
+#   Dev:        no host field = catch-all — accepts any hostname, no TLS needed,
+#               works via localhost:3000 port-forward.
+#
+# Both Ingress resources can coexist in the cluster. HAProxy matches the production
+# Ingress for requests with the production hostname, and this dev catch-all for everything
+# else (localhost, 127.0.0.1, direct NodePort access, etc.).
+#
+# Applied by app.sh automatically when ingressClassName haproxy-4 is available in the cluster.
+# Not applied in production — production uses 04-ingress.yaml only.
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: bucket-explorer-dev
+  namespace: bucket-explorer
+  labels:
+    app: frontend
+    component: routing
+    environment: dev
+spec:
+  ingressClassName: haproxy-4
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend-service
+                port:
+                  number: 80
