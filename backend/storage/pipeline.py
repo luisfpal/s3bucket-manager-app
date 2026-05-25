@@ -408,7 +408,7 @@ def _sync_rgwsquared_user_access(user, ceph_username, tenant, required=False):
     """
     from django.conf import settings
     from storage.models import TenantMembership
-    from storage.services.rgw_squared import RGWSquaredClient
+    from storage.services.rgw_squared import RGWSquaredClient, RGWSquaredError
 
     structure = structure_name(tenant)
     if not structure:
@@ -425,10 +425,42 @@ def _sync_rgwsquared_user_access(user, ceph_username, tenant, required=False):
         )
         users = client.list_users(structure)
         if ceph_username not in users:
-            logger.warning(
-                "RGWSquared user %s not found in structure %s", ceph_username, structure
-            )
-            return False
+            if not required:
+                # Non-NFFADI: auto-provision the Ceph account on first login.
+                # GroupTenantMapping grants access; we just need the account to exist.
+                logger.info(
+                    "Auto-provisioning RGWSquared user %s in %s", ceph_username, structure
+                )
+                try:
+                    client.create_user(structure, ceph_username)
+                except RGWSquaredError as create_err:
+                    err_lower = str(create_err).lower()
+                    if "already" in err_lower or "exist" in err_lower:
+                        # Race between list_users and create_user — already exists, fine.
+                        logger.info(
+                            "RGWSquared user %s already present in %s (concurrent provision handled)",
+                            ceph_username,
+                            structure,
+                        )
+                    else:
+                        logger.warning(
+                            "Could not auto-provision %s in %s: %s — login will succeed "
+                            "but S3 ops may fail until the account is created",
+                            ceph_username,
+                            structure,
+                            create_err,
+                        )
+                        return False
+                # Newly provisioned user has no buckets yet.
+                # Skip get_user_info + update_or_create: empty RWBuckets would set
+                # role="ro" and override the GroupTenantMapping role already written
+                # by get_or_create in extract_tenant_info.
+                return True
+            else:
+                logger.warning(
+                    "RGWSquared user %s not found in structure %s", ceph_username, structure
+                )
+                return False
 
         info = client.get_user_info(structure, ceph_username)
         ro_buckets = info.get("ROBuckets", [])

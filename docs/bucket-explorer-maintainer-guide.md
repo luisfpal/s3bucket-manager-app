@@ -77,6 +77,52 @@ pattern is:
 
 RGWSquared may still refine bucket visibility when data is available.
 
+### RGWSquared user provisioning by tenant type
+
+How a user gains a Ceph account depends on which model the tenant uses.
+
+**NFFADI (and future proposal-based tenants):** Users are pre-provisioned by the
+institution or research programme — RGWSquared maintains the authoritative user list. The
+login pipeline checks `userList` and rejects login if the user is absent (`required=True`).
+Role and bucket access come from RGWSquared `userInfo`. The webapp never creates users in
+RGWSquared for these tenants.
+
+**Simple non-NFFADI tenants (GENOME, PHOTON, etc.):** Users arrive through Authentik. The
+`GroupTenantMapping` is the access authority (role = `rw` or `ro`). At login, if the user
+is not yet present in RGWSquared, the pipeline auto-creates the Ceph account via
+`userCreate` (`_sync_rgwsquared_user_access` in `pipeline.py`, `required=False` path). The
+user starts with no project buckets; they create local buckets from the UI.
+
+**Admin responsibility:** The `GroupTenantMapping` for every tenant a user belongs to must
+be configured **before** the user's first login attempt. If the mapping does not exist at
+login time, the pipeline raises `AuthForbidden` and the browser shows "Your Authentik
+account is not a member of any registered group." This is a configuration gap, not a code
+bug — set up the mapping in the admin Tenants panel first.
+
+**Proposals and project buckets for non-NFFADI tenants — open design decision:**
+
+The current codebase syncs proposal/project bucket records from RGWSquared at login only for
+tenants where `_sync_rgwsquared_user_access` returns True and the user has bucket entries in
+`userInfo`. For simple non-NFFADI tenants whose users are auto-provisioned and start with no
+buckets, this sync produces no records — which is correct for the current use case (local
+buckets only).
+
+If a future non-NFFADI tenant needs to expose upstream proposal or project buckets (like
+NFFADI does), the maintainer must decide between two approaches:
+
+1. **Adopt the NFFADI model**: set `required=True` for the tenant, require users to be
+   pre-provisioned in RGWSquared by an upstream system, and let `_sync_user_buckets_on_login`
+   populate bucket records. Suitable when an external system manages the user roster.
+
+2. **Periodic sync model**: keep `required=False` (auto-provision at login) and add an
+   explicit admin refresh action that calls `userInfo` for each member and syncs bucket
+   access. Suitable when the bucket list changes independently of login events.
+
+Neither path is currently implemented for non-NFFADI tenants. Choosing the wrong model causes
+silent bugs: approach 1 without pre-provisioning locks out all users; approach 2 without the
+refresh action leaves bucket records perpetually stale. Document the chosen model in this
+guide when it is implemented.
+
 ## Tenant Activation
 
 The admin Tenants page is the operator workflow for turning an RGWSquared
