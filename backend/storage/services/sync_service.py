@@ -131,40 +131,35 @@ def refresh_local_cache(tenant, client=None):
         }
         role = "rw" if user_perms["rw"] else "ro"
 
-        # Authentik may sanitize usernames, so match through membership before creating.
-        try:
-            user = User.objects.get(username=username)
-        except User.DoesNotExist:
-            membership = (
-                TenantMembership.objects.filter(tenant=tenant, ceph_username=username)
-                .select_related("user")
-                .first()
+        # Resolve the Django user for this ceph_username.
+        # Priority: existing TenantMembership → real user by email or username → new placeholder.
+        membership = (
+            TenantMembership.objects.filter(tenant=tenant, ceph_username=username)
+            .select_related("user")
+            .first()
+        )
+        if membership:
+            user = membership.user
+        elif "@" in username:
+            # Email-format: Django sanitises dots→underscores in .username, so match by .email.
+            # This also covers the case where the user logged in before this tenant was activated.
+            user = User.objects.filter(email=username).first()
+        else:
+            # Short-format: .username is stored unchanged, direct match works.
+            user = User.objects.filter(username=username).first()
+
+        if not user:
+            # Placeholder: lets admins inspect RGWSquared grants before the user's first login.
+            # associate_by_ceph_username in the OAuth pipeline will attach the real identity later.
+            user = User.objects.create(
+                username=username,
+                email=f"{username}@placeholder.local",
+                external_id=f"ms:{structure}:{username}",
+                is_active=True,
+                is_approved=True,
             )
-            if membership:
-                user = membership.user
-            else:
-                # For email-format ceph_usernames (has "@"): the user may have logged in
-                # via OAuth before this tenant was activated, creating a real Django user
-                # with email=ceph_username. Reuse it to avoid a unique_active_ceph_username
-                # constraint conflict when the pipeline runs update_or_create at next login.
-                # Short-format usernames (no "@") are found directly by username above.
-                real_user = (
-                    User.objects.filter(email=username).first() if "@" in username else None
-                )
-                if real_user:
-                    user = real_user
-                else:
-                    # Placeholder users let admins inspect RGWSquared grants before login.
-                    # The OAuth pipeline later attaches the real identity to this record.
-                    user = User.objects.create(
-                        username=username,
-                        email=f"{username}@placeholder.local",
-                        external_id=f"ms:{structure}:{username}",
-                        is_active=True,
-                        is_approved=True,
-                    )
-                    logger.info(f"Created placeholder user for {username} in {structure}")
-                    stats["users_created"] = stats.get("users_created", 0) + 1
+            logger.info(f"Created placeholder user for {username} in {structure}")
+            stats["users_created"] = stats.get("users_created", 0) + 1
 
         membership, _ = TenantMembership.objects.update_or_create(
             user=user,
