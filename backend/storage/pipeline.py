@@ -18,24 +18,42 @@ def validate_required_claims(backend, details, response, *args, **kwargs):
     """Require stable federation keys before provisioning a local account."""
     sub = response.get("sub")
     if not sub:
-        logger.error(f"OAuth2 response missing 'sub' claim. Response: {response}")
+        logger.error("OAuth2 response missing 'sub' claim. Response: %s", response)
         raise AuthForbidden(
             backend,
             "Identity provider did not provide user ID ('sub' claim). "
             "Please check your OAuth2 provider configuration.",
         )
 
-    email = response.get("email") or details.get("email")
+    # Authentik users created with an email-like username but no explicit email field
+    # produce email="" in the JWT. Fall back to preferred_username (the login identifier)
+    # so these users can log in. Downstream steps (associate_by_email, create_or_update_user)
+    # see a consistent non-empty value via the returned details dict.
+    email = (
+        response.get("email")
+        or details.get("email")
+        or response.get("preferred_username")
+    )
     if not email:
-        logger.error(f"OAuth2 response missing 'email' claim. Response: {response}")
+        logger.error(
+            "OAuth2 response missing both 'email' and 'preferred_username' claims. "
+            "Response: %s",
+            response,
+        )
         raise AuthForbidden(
             backend,
-            "Identity provider did not provide email address. "
-            "Please ensure 'email' scope is requested and user has email configured.",
+            "Identity provider did not provide an email address or username. "
+            "Please ensure the user has either an email or username configured in Authentik.",
         )
 
-    logger.info(f"OAuth2 claims validated successfully. sub={sub}, email={email}")
-    return None
+    if not (response.get("email") or details.get("email")):
+        logger.info(
+            "Email claim empty; using preferred_username as email fallback: %s", email
+        )
+
+    details["email"] = email
+    logger.info("OAuth2 claims validated. sub=%s, email=%s", sub, email)
+    return {"details": details}
 
 
 def extract_external_id(backend, details, response, user=None, *args, **kwargs):
