@@ -493,14 +493,16 @@ def _sync_rgwsquared_user_access(user, ceph_username, tenant, required=False):
             bucket_items=bucket_items,
         )
 
+        # For NFFADI (required=True): role is authoritative from RGWSquared bucket assignments.
+        # For non-NFFADI (required=False): role is authoritative from GroupTenantMapping;
+        # extract_tenant_info already set it correctly — do not override.
+        uoc_defaults = {"ceph_username": ceph_username, "is_active": True}
+        if required:
+            uoc_defaults["role"] = role
         membership, _ = TenantMembership.objects.update_or_create(
             user=user,
             tenant=tenant,
-            defaults={
-                "ceph_username": ceph_username,
-                "role": role,
-                "is_active": True,
-            },
+            defaults=uoc_defaults,
         )
         if not is_write_capable(membership.role) and membership.uo_code:
             membership.uo_code = ""
