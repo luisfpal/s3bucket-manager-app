@@ -88,12 +88,18 @@ RGWSquared is essentially a service wrapper around **Ceph RGW**: RADOS Gateway, 
 
 RGWSquared is currently private because it is tightly coupled to ORFEO-specific infrastructure and collaboration workflows. The integration in this repository should therefore be treated as a deployment dependency and boundary, not as a complete public specification of the microservice. A future deployment could replace RGWSquared by implementing the same essential pipeline: map collaboration/project state to users, buckets, and Ceph RGW access policies.
 
+### Kubernetes manifests structure
+
+`k8s/manifests/` is split into `app/` and `infra/` to mirror the deployment topology at AREA Science Park, where Authentik and other infrastructure services are administered by a separate infrastructure team — not by the team that operates Bucket Explorer. The development environment preserves this boundary explicitly: `infra.sh` owns Authentik, `app.sh` owns the webapp namespace. In production, when an Authentik instance is already running (the common case at institutions that share an identity platform), only the `app/` manifests need to be applied. See the [Production deployment guide](docs/production-deployment.md) for the full deployment workflow.
+
 ## Further Documentation
 
 - [RGWSquared API guide](docs/rgwsquared-api.md) documents the stable webapp-facing RGWSquared calls with sanitized curl examples.
 - [Maintainer guide](docs/bucket-explorer-maintainer-guide.md) explains tenant routing, identity fields, bucket naming, file naming, admin workflows, and the Django data model.
 - [Database schema](docs/database-schema.html) is a standalone visual ERD for the current Django models; [PDF export](docs/database-schema.pdf) is included for review and sharing.
 - [API documentation guide](docs/api-documentation.md) explains the drf-spectacular / Swagger UI setup and how to access interactive API docs in development and production.
+- [Production deployment guide](docs/production-deployment.md) explains how to deploy the webapp to a real Kubernetes cluster, including configuration requirements, the deployment sequence, and container image ownership.
+- [UO code tenants](docs/uo-code-tenants.md) explains how to configure institutional UO codes for tenants where users from different research institutions share storage and need provenance in bucket names.
 - [Development environment overview](docs/dev-environment-overview.md) describes the Stencil virtual datacenter used for development and how the application fits into it.
 - [Development environment setup](docs/dev-environment-setup.md) is a step-by-step guide for reproducing the development environment from scratch.
 
@@ -303,6 +309,8 @@ s3bucket_manager_app/
 ├── NOTICE                          # Attribution and project context
 └── README.md                       # This file
 ```
+
+> **Container images:** The current codebase builds and pushes images to `ghcr.io/luisfpal/buckets-explorer-{backend,frontend}` — the personal container registry of the original maintainer. `k8s/.env` (gitignored) holds the `GHCR_TOKEN` needed to push rebuilt images via `app.sh`. A new maintainer who takes over image publishing must create `k8s/.env` with `GHCR_TOKEN=<GitHub classic PAT with write:packages scope>` and update `GHCR_OWNER` near the top of `k8s/app.sh` to their own GitHub username or organisation. See the [Production deployment guide](docs/production-deployment.md) for details.
 
 ## Operations Notes
 
