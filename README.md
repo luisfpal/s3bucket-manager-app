@@ -374,6 +374,12 @@ The repository stores source code, Kubernetes templates, dependency manifests, a
 
 Backend dependencies are pinned in `backend/requirements.txt` and installed by `backend/Containerfile`. Frontend dependencies are locked in `frontend/package-lock.json`.
 
+## Acknowledgements
+
+This project is part of a master's thesis submitted for the **Master in Data Management and Curation (MDMC)** programme at SISSA and AREA Science Park (2025–2026). The thesis title is *Building Service Layers in the NFFA-DI Digital Ecosystem: Governed Bucket Management and Reusable Analysis Services*.
+
+I would like to thank my supervisor, **Dr. Federica Bazzocchi** (AREA Science Park), for her guidance and support throughout this thesis work.
+
 ## License
 
 Copyright is held by AREA Science Park. The author is Luis Fernando Palacios Flores.
