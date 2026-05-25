@@ -14,6 +14,7 @@ const authErrorMessages: Record<string, string> = {
   oauth_state_missing: 'Your login session expired or the callback was opened without the original browser session. Start the login again from here.',
   oauth_state_invalid: 'The login state did not match this browser session. Start the login again from here.',
   oauth_forbidden: 'Your Authentik account is not a member of any registered group. Please contact the storage platform administrators to request access.',
+  missing_email: 'Your Authentik account does not have an email address configured. Please contact the administrator to set your email in the Authentik user profile.',
   oauth_cancelled: 'The Authentik login was cancelled. Start the login again when ready.',
   oauth_failed: 'Authentik login failed. Start the login again from here.',
 }

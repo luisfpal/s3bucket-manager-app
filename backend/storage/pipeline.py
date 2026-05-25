@@ -25,30 +25,20 @@ def validate_required_claims(backend, details, response, *args, **kwargs):
             "Please check your OAuth2 provider configuration.",
         )
 
-    # Authentik users created with an email-like username but no explicit email field
-    # produce email="" in the JWT. Fall back to preferred_username (the login identifier)
-    # so these users can log in. Downstream steps (associate_by_email, create_or_update_user)
-    # see a consistent non-empty value via the returned details dict.
-    email = (
-        response.get("email")
-        or details.get("email")
-        or response.get("preferred_username")
-    )
+    email = response.get("email") or details.get("email")
     if not email:
+        from storage.middleware import AuthMissingEmailClaim
+        preferred_username = response.get("preferred_username", "<unknown>")
         logger.error(
-            "OAuth2 response missing both 'email' and 'preferred_username' claims. "
-            "Response: %s",
-            response,
+            "Email claim missing or empty for Authentik user '%s' (sub=%s). "
+            "Admin must set the email address field in their Authentik user profile.",
+            preferred_username,
+            sub,
         )
-        raise AuthForbidden(
+        raise AuthMissingEmailClaim(
             backend,
-            "Identity provider did not provide an email address or username. "
-            "Please ensure the user has either an email or username configured in Authentik.",
-        )
-
-    if not (response.get("email") or details.get("email")):
-        logger.info(
-            "Email claim empty; using preferred_username as email fallback: %s", email
+            f"User '{preferred_username}' has no email configured in Authentik. "
+            "Admin must set the email field in their Authentik user profile.",
         )
 
     details["email"] = email

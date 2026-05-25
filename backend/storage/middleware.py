@@ -16,6 +16,15 @@ from social_core.exceptions import (
 logger = logging.getLogger(__name__)
 
 
+class AuthMissingEmailClaim(AuthForbidden):
+    """Raised when Authentik provides an empty email claim.
+
+    Distinct from AuthForbidden (group mismatch) so the frontend can show a
+    targeted message directing the admin to set the user's email in Authentik.
+    """
+    pass
+
+
 class OAuthExceptionRedirectMiddleware:
     """Turn social-auth exceptions into a retryable frontend login state."""
 
@@ -34,6 +43,8 @@ class OAuthExceptionRedirectMiddleware:
             error_code = "oauth_state_missing"
         elif isinstance(exception, AuthStateForbidden):
             error_code = "oauth_state_invalid"
+        elif isinstance(exception, AuthMissingEmailClaim):
+            error_code = "missing_email"
         elif isinstance(exception, AuthForbidden):
             error_code = "oauth_forbidden"
         elif isinstance(exception, AuthCanceled):
