@@ -45,7 +45,7 @@ urlpatterns = [
     path("api/health/", health_check, name="health_check"),
     # API documentation — access controlled by SPECTACULAR_SETTINGS['SERVE_PERMISSIONS']:
     # open in dev (DEBUG=True), restricted to is_staff in production (DEBUG=False).
-    # To access in prod: get JWT from POST /api/admin/login/, then click "Authorize" in Swagger.
+    # Access in prod: log in at /admin/login (React panel) — sets session cookie; navigate to /api/docs/ directly.
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
     path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
     path("api/redoc/", SpectacularRedocView.as_view(url_name="schema"), name="redoc"),

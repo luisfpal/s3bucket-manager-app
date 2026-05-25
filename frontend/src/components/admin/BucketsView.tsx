@@ -58,6 +58,7 @@ function BucketsView() {
       setDeleteTarget(null)
       setConfirmText('')
     } catch (err: unknown) {
+      setConfirmText('')
       setDeleteError(getApiError(err, 'Delete failed'))
     } finally {
       setDeleting(null)
@@ -74,7 +75,7 @@ function BucketsView() {
       setConfirmText('')
       setDeleteError(null)
     } catch (err: unknown) {
-      setError(getApiError(err, 'Force delete failed'))
+      setDeleteError(getApiError(err, 'Force delete failed'))
     } finally {
       setForceDeleting(false)
     }
@@ -232,7 +233,7 @@ function BucketsView() {
                     <td>
                       {b.is_deletable && (
                         <button
-                          onClick={(e) => { e.stopPropagation(); setDeleteTarget(b); setConfirmText('') }}
+                          onClick={(e) => { e.stopPropagation(); setDeleteTarget(b); setConfirmText(''); setDeleteError(null) }}
                           disabled={deleting === b.id}
                           className="button-delete-small"
                         >
@@ -321,7 +322,7 @@ function BucketsView() {
               <button className="button-secondary" onClick={() => { setDeleteTarget(null); setDeleteError(null) }}>Cancel</button>
               <button
                 className="button-delete-small"
-                disabled={confirmText !== deleteTarget.name || deleting === deleteTarget.id}
+                disabled={confirmText !== deleteTarget.name || deleting === deleteTarget.id || !!deleteError}
                 onClick={handleDeleteConfirm}
                 style={{ padding: '0.5rem 1.5rem' }}
               >
@@ -337,11 +338,11 @@ function BucketsView() {
                   {deleteError}
                 </p>
                 <p style={{ margin: '0 0 0.75rem', color: '#78350f', fontSize: '0.83rem' }}>
-                  If the underlying storage was already removed externally, you can remove the database record only.
+                  This option is only safe when the bucket no longer exists in storage. It removes the database record without touching object storage.
                 </p>
                 <button
                   className="button-delete-small"
-                  disabled={forceDeleting}
+                  disabled={confirmText !== deleteTarget.name || forceDeleting}
                   onClick={handleForceDelete}
                   style={{ width: '100%', padding: '0.5rem' }}
                 >

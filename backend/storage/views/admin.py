@@ -8,7 +8,9 @@ import csv
 import io
 import logging
 
-from django.contrib.auth import authenticate
+from django.contrib.admin.models import LogEntry, DELETION
+from django.contrib.auth import authenticate, login as django_login
+from django.contrib.contenttypes.models import ContentType
 from django.db.models import Count, Q, Sum
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes, throttle_classes
@@ -115,6 +117,8 @@ def admin_login(request):
         )
 
     logger.info("Admin login succeeded username=%s ip=%s", username, client_ip)
+    django_login(request, user)
+    request.session.set_expiry(86400)  # 24h: docs access outlives OAuth handshake sessions (300s)
     refresh = RefreshToken.for_user(user)
     return Response(
         {
@@ -244,11 +248,21 @@ def admin_bucket_detail(request, bucket_id):
             ensure_structure_initialized(bucket.tenant, client=client)
             client.delete_bucket(_structure_name(bucket.tenant), bucket.name)
         except RGWSquaredError as e:
-            if not force:
+            err_str = str(e).lower()
+            bucket_missing = "null" in err_str or "not found" in err_str or "does not exist" in err_str
+            if not force or not bucket_missing:
                 return _error_response(e, status.HTTP_400_BAD_REQUEST)
             logger.warning(
                 "Force-deleting bucket %s from DB despite RGWSquared error: %s",
                 bucket.name, e,
+            )
+            LogEntry.objects.log_action(
+                user_id=request.user.pk,
+                content_type_id=ContentType.objects.get_for_model(Bucket).pk,
+                object_id=bucket.pk,
+                object_repr=bucket.name,
+                action_flag=DELETION,
+                change_message=f"Force-deleted: RGWSquared error bypassed: {e}",
             )
         except RuntimeError as e:
             return _error_response(e, status.HTTP_503_SERVICE_UNAVAILABLE)
