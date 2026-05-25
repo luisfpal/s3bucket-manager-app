@@ -143,17 +143,28 @@ def refresh_local_cache(tenant, client=None):
             if membership:
                 user = membership.user
             else:
-                # Placeholder users let admins inspect RGWSquared grants before login.
-                # The OAuth pipeline later attaches the real identity to this record.
-                user = User.objects.create(
-                    username=username,
-                    email=f"{username}@placeholder.local",
-                    external_id=f"ms:{structure}:{username}",
-                    is_active=True,
-                    is_approved=True,
+                # For email-format ceph_usernames (has "@"): the user may have logged in
+                # via OAuth before this tenant was activated, creating a real Django user
+                # with email=ceph_username. Reuse it to avoid a unique_active_ceph_username
+                # constraint conflict when the pipeline runs update_or_create at next login.
+                # Short-format usernames (no "@") are found directly by username above.
+                real_user = (
+                    User.objects.filter(email=username).first() if "@" in username else None
                 )
-                logger.info(f"Created placeholder user for {username} in {structure}")
-                stats["users_created"] = stats.get("users_created", 0) + 1
+                if real_user:
+                    user = real_user
+                else:
+                    # Placeholder users let admins inspect RGWSquared grants before login.
+                    # The OAuth pipeline later attaches the real identity to this record.
+                    user = User.objects.create(
+                        username=username,
+                        email=f"{username}@placeholder.local",
+                        external_id=f"ms:{structure}:{username}",
+                        is_active=True,
+                        is_approved=True,
+                    )
+                    logger.info(f"Created placeholder user for {username} in {structure}")
+                    stats["users_created"] = stats.get("users_created", 0) + 1
 
         membership, _ = TenantMembership.objects.update_or_create(
             user=user,
