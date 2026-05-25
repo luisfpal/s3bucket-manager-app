@@ -141,9 +141,13 @@ def refresh_local_cache(tenant, client=None):
         if membership:
             user = membership.user
         elif "@" in username:
-            # Email-format: Django sanitises dots→underscores in .username, so match by .email.
-            # This also covers the case where the user logged in before this tenant was activated.
-            user = User.objects.filter(email=username).first()
+            # Placeholder from a previous sync stores the raw ceph_username verbatim in .username
+            # (sync uses create() directly, bypassing Django's sanitisation). Real OAuth users have
+            # .username sanitised (dots→underscores) but .email = ceph_username. Try both.
+            user = (
+                User.objects.filter(username=username).first()
+                or User.objects.filter(email=username).first()
+            )
         else:
             # Short-format: .username is stored unchanged, direct match works.
             user = User.objects.filter(username=username).first()
