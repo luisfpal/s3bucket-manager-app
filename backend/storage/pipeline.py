@@ -334,6 +334,15 @@ def extract_tenant_info(backend, details, response, user=None, *args, **kwargs):
             "No GroupTenantMapping matched Authentik groups %r — access denied." % (groups,),
         )
 
+    # Collapse to one mapping per tenant: rw takes precedence over ro.
+    # unique_together=(tenant, role) guarantees at most two entries per tenant.
+    _best: dict[int, GroupTenantMapping] = {}
+    for _m in mappings:
+        _tid = _m.tenant_id
+        if _tid not in _best or (_m.role == "rw" and _best[_tid].role != "rw"):
+            _best[_tid] = _m
+    mappings = list(_best.values())
+
     matched_tenants = []
     for mapping in mappings:
         tenant = mapping.tenant
