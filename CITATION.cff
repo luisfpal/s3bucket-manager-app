@@ -1,0 +1,65 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: Bucket Explorer
+version: 1.0.0
+date-released: "2026-05-26"
+license: EUPL-1.2
+repository-code: https://github.com/RitAreaSciencePark/s3bucket-manager-app
+abstract: >
+  A web application for managing S3 buckets on Ceph RADOS Gateway (RGW),
+  deployed on Kubernetes. Built for multi-tenant research facilities to
+  support governed bucket management and access control in the NFFA-DI
+  Digital Ecosystem at AREA Science Park. Integrates with RGWSquared,
+  an internal storage policy microservice for Ceph RGW developed at
+  AREA Science Park.
+authors:
+  - family-names: Palacios Flores
+    given-names: Luis Fernando
+    email: luf.palacios@gmail.com
+    orcid: https://orcid.org/0009-0008-3517-6061
+    affiliation: AREA Science Park
+  - family-names: Bazzocchi
+    given-names: Federica
+    email: federica.bazzocchi@areasciencepark.it
+    orcid: https://orcid.org/0000-0001-9506-0943
+    affiliation: AREA Science Park
+keywords:
+  - S3
+  - object storage
+  - Ceph
+  - Kubernetes
+  - Django
+  - React
+  - multi-tenant
+  - research data management
+  - NFFA-DI
+  - ORFEO
+  - K3s
+references:
+  - type: software
+    title: RGWSquared
+    authors:
+      - family-names: Cessarato
+        given-names: Marco
+    notes: >
+      Internal storage policy microservice for Ceph RGW used at AREA Science Park.
+      Manages user and bucket access policies for the ORFEO data center.
+preferred-citation:
+  type: thesis
+  title: >-
+    Building Service Layers in the NFFA-DI Digital Ecosystem: Governed
+    Bucket Management and Reusable Analysis Services
+  authors:
+    - family-names: Palacios Flores
+      given-names: Luis Fernando
+      email: luf.palacios@gmail.com
+      orcid: https://orcid.org/0009-0008-3517-6061
+      affiliation: AREA Science Park
+  year: 2026
+  institution:
+    name: SISSA and AREA Science Park
+  thesis-type: "Master's thesis"
+  notes: >
+    Master in Data Management and Curation (MDMC), 2025–2026.
+    Supervised by Dr. Federica Bazzocchi (federica.bazzocchi@areasciencepark.it).

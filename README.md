@@ -378,7 +378,7 @@ Backend dependencies are pinned in `backend/requirements.txt` and installed by `
 
 This project is part of a master's thesis submitted for the **Master in Data Management and Curation (MDMC)** programme at SISSA and AREA Science Park (2025–2026). The thesis title is *Building Service Layers in the NFFA-DI Digital Ecosystem: Governed Bucket Management and Reusable Analysis Services*.
 
-I would like to thank my supervisor, **Dr. Federica Bazzocchi** (AREA Science Park), for her guidance and support throughout this thesis work.
+I would like to thank my supervisor, **Dr. Federica Bazzocchi** ([federica.bazzocchi@areasciencepark.it](mailto:federica.bazzocchi@areasciencepark.it)), for her guidance and support throughout this thesis work.
 
 ## License
 
