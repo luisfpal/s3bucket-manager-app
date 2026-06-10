@@ -4,6 +4,7 @@ type: software
 title: Bucket Explorer
 version: 1.0.0
 date-released: "2026-06-10"
+doi: 10.5281/zenodo.20623985
 license: EUPL-1.2
 repository-code: https://github.com/RitAreaSciencePark/s3bucket-manager-app
 abstract: >

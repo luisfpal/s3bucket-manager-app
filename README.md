@@ -4,6 +4,8 @@ A web application for managing S3 buckets on **Ceph RADOS Gateway (RGW)**, deplo
 
 **Live deployment:** [https://buckets-explorer.areasciencepark.it/](https://buckets-explorer.areasciencepark.it/)
 
+**DOI:** [10.5281/zenodo.20623985](https://doi.org/10.5281/zenodo.20623985)
+
 ## Architecture
 
 ```mermaid
