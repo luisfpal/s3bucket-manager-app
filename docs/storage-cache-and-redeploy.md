@@ -1,6 +1,6 @@
 # Storage Cache and Redeploy Semantics
 
-Bucket Explorer sits on three independent layers. Understanding which layer owns what prevents surprises after deploys, rollouts, or database wipes.
+Buckets Explorer sits on three independent layers. Understanding which layer owns what prevents surprises after deploys, rollouts, or database wipes.
 
 ## Three layers
 

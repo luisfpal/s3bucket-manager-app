@@ -1,6 +1,6 @@
-# Bucket Explorer Maintainer Guide
+# Buckets Explorer Maintainer Guide
 
-Bucket Explorer is a tenant-aware web app for using Ceph RGW storage without
+Buckets Explorer is a tenant-aware web app for using Ceph RGW storage without
 asking researchers to know Ceph, S3 policies, or RGWSquared internals. Django
 stores the application state that makes the UI usable. RGWSquared owns storage
 policy and bucket lifecycle. Ceph RGW stores object data.
@@ -91,7 +91,7 @@ should see a readable name, while the backend still needs the exact RGWSquared
 username for policy calls.
 
 Login is tenant-gated. A user can authenticate successfully at Authentik and
-still be denied by Bucket Explorer if no activated tenant is eligible. The app
+still be denied by Buckets Explorer if no activated tenant is eligible. The app
 accepts partial multi-tenant login: if a user belongs to several tenants and one
 tenant is not ready, login still succeeds for the tenants that are ready.
 
@@ -207,11 +207,11 @@ coverage.
 
 ## Buckets
 
-Bucket Explorer shows two bucket types.
+Buckets Explorer shows two bucket types.
 
 | Type | Source | Delete behavior | Permission source |
 | --- | --- | --- | --- |
-| Proposal bucket | RGWSquared upstream project state | Not deletable from Bucket Explorer | RGWSquared |
+| Proposal bucket | RGWSquared upstream project state | Not deletable from Buckets Explorer | RGWSquared |
 | Local bucket | Created by a write-capable tenant user | Owner can delete it | Django local sharing pushed to RGWSquared |
 
 Proposal buckets represent official project or collaboration storage. Their
@@ -236,7 +236,7 @@ All buckets use the same read/write object permissions:
 
 ## Bucket Names
 
-Bucket Explorer deliberately separates user-facing names from storage names. A
+Buckets Explorer deliberately separates user-facing names from storage names. A
 researcher does not need to see tenant prefixes, usernames, or UO segments while
 working with a bucket. Admins do need those details when debugging storage state.
 
@@ -300,7 +300,7 @@ owners can delete any file; shared RW users can delete only files they uploaded.
 The database is not a copy of Ceph. It is the state needed to make the UI,
 tenant selection, sharing, audit, and admin workflows work.
 
-The table summaries below show Bucket Explorer's application fields. Standard
+The table summaries below show Buckets Explorer's application fields. Standard
 Django auth columns inherited by the custom user model are omitted for clarity.
 
 ### Relationships

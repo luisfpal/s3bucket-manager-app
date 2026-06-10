@@ -1,4 +1,4 @@
-# Bucket Explorer
+# Buckets Explorer
 
 S3 object storage management web app for multi-tenant research facilities.
 

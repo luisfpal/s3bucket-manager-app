@@ -1,5 +1,5 @@
 /**
- * API Service — Multi-tenant Bucket Explorer
+ * API Service — Multi-tenant Buckets Explorer
  *
  * All requests include X-Tenant-ID header when a tenant is active.
  * baseURL = '/api' — nginx proxies to Django backend.

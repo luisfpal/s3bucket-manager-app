@@ -4,7 +4,7 @@
 # ==============================================================================
 #
 # PURPOSE:
-#   Manages the Bucket Explorer webapp in the bucket-explorer namespace.
+#   Manages the Buckets Explorer webapp in the bucket-explorer namespace.
 #   This is the APPLICATION layer — it assumes Authentik is already running
 #   and reachable (deployed by infra.sh, or running locally for testing).
 #

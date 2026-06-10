@@ -1,6 +1,6 @@
 # Setting Up the Development Environment
 
-This document walks through building the Stencil virtual datacenter from scratch: cloning the provisioning repositories, configuring each layer, and adding the components specific to this project. A person who completes these steps will have an environment identical to the one used to develop and validate Bucket Explorer.
+This document walks through building the Stencil virtual datacenter from scratch: cloning the provisioning repositories, configuring each layer, and adding the components specific to this project. A person who completes these steps will have an environment identical to the one used to develop and validate Buckets Explorer.
 
 Before starting: read [dev-environment-overview.md](./dev-environment-overview.md) to understand what you are building and why.
 

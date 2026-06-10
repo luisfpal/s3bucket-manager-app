@@ -1,4 +1,4 @@
-# Bucket Explorer
+# Buckets Explorer
 
 A web application for managing S3 buckets on **Ceph RADOS Gateway (RGW)**, deployed on **Kubernetes (K3s)**. Built with Django REST Framework, React, nginx, PostgreSQL, Authentik OAuth2/OIDC, and the RGWSquared integration used by the storage platform.
 
@@ -94,7 +94,7 @@ RGWSquared is currently private because it is tightly coupled to ORFEO-specific 
 
 ### Kubernetes manifests structure
 
-`k8s/manifests/` is split into `app/` and `infra/` to mirror the deployment topology at AREA Science Park, where Authentik and other infrastructure services are administered by a separate infrastructure team — not by the team that operates Bucket Explorer. The development environment preserves this boundary explicitly: `infra.sh` owns Authentik, `app.sh` owns the webapp namespace. In production, when an Authentik instance is already running (the common case at institutions that share an identity platform), only the `app/` manifests need to be applied. See the [Production deployment guide](docs/production-deployment.md) for the full deployment workflow.
+`k8s/manifests/` is split into `app/` and `infra/` to mirror the deployment topology at AREA Science Park, where Authentik and other infrastructure services are administered by a separate infrastructure team — not by the team that operates Buckets Explorer. The development environment preserves this boundary explicitly: `infra.sh` owns Authentik, `app.sh` owns the webapp namespace. In production, when an Authentik instance is already running (the common case at institutions that share an identity platform), only the `app/` manifests need to be applied. See the [Production deployment guide](docs/production-deployment.md) for the full deployment workflow.
 
 ## Further Documentation
 

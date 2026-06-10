@@ -4,7 +4,7 @@
 
 `k8s/manifests/` is divided into `app/` and `infra/` because in production these two layers have different owners.
 
-At AREA Science Park, Authentik is a shared identity platform administered by the infrastructure team — not by the team operating Bucket Explorer. The `infra/` directory contains Authentik and its dependencies (PostgreSQL, Redis). The `app/` directory contains the webapp: Django backend, React frontend, PostgreSQL. The boundary between them is intentional and reflects a real organizational split.
+At AREA Science Park, Authentik is a shared identity platform administered by the infrastructure team — not by the team operating Buckets Explorer. The `infra/` directory contains Authentik and its dependencies (PostgreSQL, Redis). The `app/` directory contains the webapp: Django backend, React frontend, PostgreSQL. The boundary between them is intentional and reflects a real organizational split.
 
 The development environment reproduces this boundary explicitly so that deploying to production is a **subtraction problem**: you hand off `infra/` responsibility to whoever administers Authentik, and apply only `app/` yourself. The scripts and structure you use during development are close enough to production that there are no surprises at deploy time.
 
@@ -26,7 +26,7 @@ You need:
 
 ## Scenario A — Authentik is already deployed
 
-This is the normal case at AREA Science Park. The Authentik administrator creates an OAuth2 provider for Bucket Explorer and gives you:
+This is the normal case at AREA Science Park. The Authentik administrator creates an OAuth2 provider for Buckets Explorer and gives you:
 
 | Credential | Used as |
 |---|---|
@@ -134,7 +134,7 @@ If deploying a fully standalone instance, apply `k8s/manifests/infra/` first to 
 
 After Authentik is running:
 
-1. Log in to the Authentik admin UI and create an OAuth2 provider for Bucket Explorer
+1. Log in to the Authentik admin UI and create an OAuth2 provider for Buckets Explorer
 2. Note the client ID, client secret, and application slug
 3. Register the redirect URI: `https://<domain>/api/oauth/complete/authentik/`
 4. Proceed with Scenario A
@@ -143,7 +143,7 @@ After Authentik is running:
 
 ## Container image ownership
 
-The manifests reference images at `ghcr.io/luisfpal/buckets-explorer-{backend,frontend}:latest`. That registry was used during development for full control and rapid iteration. A team deploying Bucket Explorer on their own infrastructure must publish their own images and update the manifests accordingly.
+The manifests reference images at `ghcr.io/luisfpal/buckets-explorer-{backend,frontend}:latest`. That registry was used during development for full control and rapid iteration. A team deploying Buckets Explorer on their own infrastructure must publish their own images and update the manifests accordingly.
 
 To take ownership:
 

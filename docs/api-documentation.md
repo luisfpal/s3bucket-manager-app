@@ -2,7 +2,7 @@
 
 ## Why API Documentation Matters for This Codebase
 
-Bucket Explorer exposes a REST API with around 30 endpoints across authentication, tenant management, bucket operations, file management, and admin workflows. Without interactive documentation, a new developer spends hours reading Django views and serializers to understand what each endpoint expects, what it returns, and how to authenticate.
+Buckets Explorer exposes a REST API with around 30 endpoints across authentication, tenant management, bucket operations, file management, and admin workflows. Without interactive documentation, a new developer spends hours reading Django views and serializers to understand what each endpoint expects, what it returns, and how to authenticate.
 
 The API documentation solves this: it gives a developer a live, interactive surface to understand the API, try requests directly from the browser, and export a machine-readable schema for code generation or testing.
 

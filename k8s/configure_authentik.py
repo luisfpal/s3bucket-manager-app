@@ -26,7 +26,7 @@ def configure():
     print("Starting automated Authentik configuration...")
 
     PROVIDER_NAME = "bucket-explorer-provider"
-    APP_NAME = "Bucket Explorer"
+    APP_NAME = "Buckets Explorer"
     APP_SLUG = "bucket-explorer"
     CLIENT_ID = os.environ.get("OIDC_CLIENT_ID", "bucket-explorer")
     CLIENT_SECRET = os.environ.get("OIDC_CLIENT_SECRET", "")

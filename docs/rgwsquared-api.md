@@ -1,6 +1,6 @@
 # RGWSquared API
 
-RGWSquared is the policy service that Bucket Explorer uses to manage Ceph RGW
+RGWSquared is the policy service that Buckets Explorer uses to manage Ceph RGW
 structures, users, buckets, and bucket permissions. Ceph RGW stores the objects.
 RGWSquared owns bucket lifecycle and access policy.
 
@@ -60,7 +60,7 @@ browser.
 ## Structures
 
 A structure is the RGWSquared tenant namespace used by the storage platform.
-Bucket Explorer maps each active Django tenant to one RGWSquared structure.
+Buckets Explorer maps each active Django tenant to one RGWSquared structure.
 
 ### structureList
 
@@ -140,7 +140,7 @@ Rules:
 
 ## Users
 
-RGWSquared users are Ceph-facing usernames. In Bucket Explorer they are stored as
+RGWSquared users are Ceph-facing usernames. In Buckets Explorer they are stored as
 `TenantMembership.ceph_username`. They are not necessarily the same as the local
 Django username or the user-facing display name.
 
@@ -225,7 +225,7 @@ Permission rule:
 
 ### userCreate
 
-Creates a manual user in a structure. Bucket Explorer calls this before creating
+Creates a manual user in a structure. Buckets Explorer calls this before creating
 or sharing a manual bucket when the target user may not already exist in
 RGWSquared.
 
@@ -268,7 +268,7 @@ API clients still send only the bare bucket name.
 
 ### bucketList
 
-Lists buckets in a structure. Bucket Explorer uses this to refresh local bucket
+Lists buckets in a structure. Buckets Explorer uses this to refresh local bucket
 metadata instead of listing buckets directly from Ceph.
 
 ```bash
@@ -377,13 +377,13 @@ Example response:
 }
 ```
 
-Bucket Explorer calls RGWSquared first, then persists local sharing metadata.
+Buckets Explorer calls RGWSquared first, then persists local sharing metadata.
 If local persistence fails after RGWSquared succeeds, refresh local state from
 RGWSquared and repair the Django records.
 
 ### bucketDelete
 
-Deletes a manual bucket. Bucket Explorer never calls this for proposal buckets.
+Deletes a manual bucket. Buckets Explorer never calls this for proposal buckets.
 
 ```bash
 curl -s -X POST \
@@ -417,12 +417,12 @@ Delete order:
 2. wait for success (or a definitive already-absent response from RGWSquared),
 3. delete Django metadata.
 
-Bucket Explorer does not offer a database-only delete. If `bucketDelete` fails because RGWSquared cannot reach Ceph, fix RGWSquared connectivity and retry — do not remove the Django row alone.
+Buckets Explorer does not offer a database-only delete. If `bucketDelete` fails because RGWSquared cannot reach Ceph, fix RGWSquared connectivity and retry — do not remove the Django row alone.
 
 ## NFFADI CSV Upload
 
 NFFADI uses a CSV source to map instrument scientists to institutions and
-operational units. Bucket Explorer uploads the CSV to RGWSquared and updates its
+operational units. Buckets Explorer uploads the CSV to RGWSquared and updates its
 local UO mapping cache.
 
 ```bash

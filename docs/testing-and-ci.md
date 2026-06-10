@@ -1,6 +1,6 @@
 # Testing and Continuous Integration
 
-Bucket Explorer uses **pytest** for backend tests and **`npm run build`** as the frontend compile gate. Coverage reports upload to [Codecov](https://app.codecov.io/gh/luisfpal/s3bucket-manager-app) on every CI run.
+Buckets Explorer uses **pytest** for backend tests and **`npm run build`** as the frontend compile gate. Coverage reports upload to [Codecov](https://app.codecov.io/gh/luisfpal/s3bucket-manager-app) on every CI run.
 
 There is no Jest test suite—the Codecov onboarding wizard may suggest Jest; ignore that for this project.
 

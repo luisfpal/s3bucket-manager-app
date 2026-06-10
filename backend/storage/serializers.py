@@ -1,4 +1,4 @@
-"""Serializers for multi-tenant Bucket Explorer."""
+"""Serializers for multi-tenant Buckets Explorer."""
 
 from rest_framework import serializers
 from .models import (

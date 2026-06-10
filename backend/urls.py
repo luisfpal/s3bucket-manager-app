@@ -1,4 +1,4 @@
-"""URL configuration for multi-tenant Bucket Explorer."""
+"""URL configuration for multi-tenant Buckets Explorer."""
 
 from django.http import HttpResponse
 from django.urls import path, include

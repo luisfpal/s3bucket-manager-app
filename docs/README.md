@@ -1,4 +1,4 @@
-# Bucket Explorer Documentation
+# Buckets Explorer Documentation
 
 Reading order for maintainers and operators.
 

@@ -1,7 +1,7 @@
 {
   "name": "bucket-explorer-frontend",
   "version": "1.0.0",
-  "description": "React frontend for Bucket Explorer",
+  "description": "React frontend for Buckets Explorer",
   "type": "module",
   "scripts": {
     "dev": "vite",
