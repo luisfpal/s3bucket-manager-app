@@ -65,43 +65,40 @@ Open `http://localhost:3000/api/docs/` in your browser. Swagger UI loads with al
 
 To try authenticated endpoints in Swagger UI:
 
-1. Call `POST /api/admin/login/` with the Django superuser credentials to get an admin JWT, or trigger the OAuth2 flow (`GET /api/oauth/login/authentik/`) to get a user JWT via the `/api/auth/token/` endpoint.
+1. Log in at `/admin/login` via Authentik to get an admin JWT, or trigger the user OAuth2 flow (`GET /api/oauth/login/authentik/`) to get a user JWT via `/api/auth/token/`.
 2. Click the **Authorize** button in Swagger UI (lock icon in the top right).
 3. Enter `Bearer <your-token>` in the `jwtAuth` field.
 4. All subsequent "Try it out" requests include the Authorization header.
 
-**Which token to use:** The admin JWT (`POST /api/admin/login/`) is for `GET /api/admin/*` endpoints and for accessing the schema in production. For testing user-facing endpoints (`/api/buckets/`, `/api/files/`, etc.), use the user JWT from the OAuth2 flow instead — those endpoints require a `X-Tenant-ID` header whose value comes from the `tenants` array in the `/api/auth/token/` response. An admin token has no tenant context and user endpoints will reject it with 403.
+**Which token to use:** The admin JWT (`GET /api/admin/auth/token/` after Authentik login at `/admin/login`) is for `GET /api/admin/*` endpoints and for accessing the schema in production. For testing user-facing endpoints (`/api/buckets/`, `/api/files/`, etc.), use the user JWT from the OAuth2 flow instead — those endpoints require a `X-Tenant-ID` header whose value comes from the `tenants` array in the `/api/auth/token/` response. An admin token has no tenant context and user endpoints will reject it with 403.
 
 ---
 
 ## Access in Production (DEBUG = False)
 
-When the backend runs with `DJANGO_DEBUG=False` (the prod overlay), the `SERVE_PERMISSIONS` setting switches to `rest_framework.permissions.IsAdminUser`. Only users with `is_staff=True` — in practice, the Django superuser — can access the schema and docs endpoints.
+When the backend runs with `DJANGO_DEBUG=False` (the prod overlay), the `SERVE_PERMISSIONS` setting switches to `rest_framework.permissions.IsAdminUser`. Only users with `is_staff=True` — synced from the Authentik group in `AUTHENTIK_ADMIN_GROUP` — can access the schema and docs endpoints.
 
 **Why this restriction exists:** The full endpoint map is attack-surface intelligence. A public OpenAPI schema tells an attacker the exact URL patterns, parameter types, and response shapes for every endpoint. Restricting it to admins prevents reconnaissance while keeping the documentation available to authorized developers.
 
 ### How to access docs in production
 
-The admin JWT flow does not go through OAuth2/Authentik. It uses a separate Django-native authentication endpoint:
+Admin API access uses Authentik OAuth with a separate admin-panel JWT:
+
+1. Open `https://<your-production-hostname>/admin/login` and sign in with Authentik.
+2. Your Authentik user must belong to the group configured in `AUTHENTIK_ADMIN_GROUP` (default: `buckets-explorer-admin`).
+3. After the OAuth callback, the frontend exchanges the session at `GET /api/admin/auth/token/` for admin JWTs.
 
 ```bash
-# Step 1: Obtain an admin JWT
-curl -X POST https://<your-production-hostname>/api/admin/login/ \
-  -H "Content-Type: application/json" \
-  -d '{"username": "<DJANGO_SUPERUSER_USERNAME>", "pass\u0077ord": "<DJANGO_SUPERUSER_PASSWORD>"}'
-# Response: {"access": "eyJ...", "refresh": "eyJ..."}
+# After browser login, exchange the session cookie for an admin JWT (example)
+curl -b cookies.txt https://<your-production-hostname>/api/admin/auth/token/
+# Response: {"access": "eyJ...", "refresh": "eyJ...", ...}
 
-# Step 2: Access the schema with the token
+# Access the schema with the admin token
 curl -H "Authorization: Bearer eyJ..." \
   https://<your-production-hostname>/api/schema/
-
-# Or access Swagger UI in a browser:
-# 1. Navigate to https://<your-production-hostname>/api/docs/
-# 2. Click Authorize
-# 3. Enter: Bearer <access-token-from-step-1>
 ```
 
-The admin credentials are the Django superuser set during deployment via the `DJANGO_SUPERUSER_USERNAME` and `DJANGO_SUPERUSER_PASSWORD` environment variables (configured in `k8s/env/prod/*.local.yaml`).
+For Swagger UI: log in at `/admin/login`, then open `/api/docs/` and click **Authorize** with `Bearer <access-token>`.
 
 ---
 
@@ -124,7 +121,7 @@ The admin credentials are the Django superuser set during deployment via the `DJ
 │    ...                                                               │
 │                                                                      │
 │  ▼ Admin                                                             │
-│    POST /api/admin/login/              Admin JWT login              │
+│    GET  /api/admin/auth/token/         Admin OAuth → JWT            │
 │    ...                                                               │
 │                                                                      │
 └────────────────────────────────────────────────────────────────────┘

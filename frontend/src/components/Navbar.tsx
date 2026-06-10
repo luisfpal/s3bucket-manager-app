@@ -61,9 +61,6 @@ function Navbar({ user }: NavbarProps) {
           {activeTenant?.document?.is_visible && activeTenant.document.tab_name && (
             <Link to="/guide" className="navbar-link">{activeTenant.document.tab_name}</Link>
           )}
-          {user?.is_admin && (
-            <Link to="/admin" className="navbar-link" style={{ color: '#f39c12' }}>Admin</Link>
-          )}
           <button onClick={handleLogout} className="navbar-button">Logout</button>
         </div>
       </div>

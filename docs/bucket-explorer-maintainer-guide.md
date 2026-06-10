@@ -39,6 +39,41 @@ The central boundary is:
   upload records, admin views, and local cache records.
 - Ceph RGW owns object storage.
 
+### Storage cache and redeploy
+
+Django is a **cache** of RGWSquared policy for UI purposes, not the source of truth for object bytes. After a PostgreSQL wipe (Class C deploy), admin **Sync → Refresh local cache** recreates `Bucket` rows from `bucketList` for admin inventory. Orphan manual buckets (not created via the webapp) are flagged **ORPHAN** in the admin panel only — they receive no `BucketPermission` rows and never appear on user dashboards.
+
+**Orphan prevention:** researchers must create buckets through the webapp (`POST /api/buckets/`), which sets `display_name`, `source=local` owner permission, and RGWSquared policy together. Avoid creating manual buckets directly in RGWSquared. After any database wipe, review **ORPHAN** badges and delete stale buckets promptly.
+
+See [storage-cache-and-redeploy.md](storage-cache-and-redeploy.md) for Class A/B/C checklists.
+
+## Why nginx in the frontend pod
+
+The frontend container runs **nginx**, not Node.js. Vite compiles React at image build time; the running pod only serves static files and proxies API traffic.
+
+nginx has two jobs (see `frontend/nginx.conf`):
+
+1. **Static file server** — serves the compiled SPA. React Router paths (`/dashboard`, `/auth/callback`, `/admin/login`) fall back to `index.html`.
+2. **Reverse proxy (BFF)** — forwards `/api/*` to `backend-service:8000`.
+
+**Why same origin matters:** OAuth login sets a Django session cookie. Browsers send cookies only to the same origin. If the UI were on port 3000 and Django on port 8000 as separate origins, the session cookie would not be sent on `/api/auth/token/` and login would fail. nginx makes both appear as one origin (`https://<domain>/`).
+
+```mermaid
+sequenceDiagram
+    participant Browser
+    participant Nginx as nginx_frontend_pod
+    participant Django as backend_service
+
+    Browser->>Nginx: GET /dashboard
+    Nginx->>Browser: index.html + JS bundle
+    Browser->>Nginx: GET /api/oauth/login/authentik/
+    Nginx->>Django: proxy /api/oauth/login/authentik/
+    Django->>Browser: redirect to Authentik (session cookie set)
+    Browser->>Nginx: GET /api/auth/token/ (cookie included)
+    Nginx->>Django: proxy /api/auth/token/
+    Django->>Browser: JWT for SPA
+```
+
 ## Identity and Login
 
 The app uses several usernames because each system has a different job.
@@ -92,6 +127,30 @@ RGWSquared for these tenants.
 is not yet present in RGWSquared, the pipeline auto-creates the Ceph account via
 `userCreate` (`_sync_rgwsquared_user_access` in `pipeline.py`, `required=False` path). The
 user starts with no project buckets; they create local buckets from the UI.
+
+**Code path for `userCreate` (non-NFFADI first login):**
+
+```mermaid
+flowchart TD
+    Login[User completes Authentik OAuth]
+    Pipeline["extract_tenant_info() in pipeline.py"]
+    Sync["_sync_rgwsquared_user_access(required=False)"]
+    List["RGWSquaredClient.list_users(structure)"]
+    Create["RGWSquaredClient.create_user() → POST /s3struct/userCreate"]
+    Done[Login succeeds; role from GroupTenantMapping]
+
+    Login --> Pipeline --> Sync --> List
+    List -->|user absent| Create --> Done
+    List -->|user present| Done
+```
+
+Implementation references:
+
+- `storage/pipeline.py` — `_sync_rgwsquared_user_access()` calls `create_user` when `ceph_username not in users` and `required=False`.
+- `storage/services/rgw_squared.py` — `create_user()` posts `{"structure", "user"}` to `/s3struct/userCreate`.
+- `docs/rgwsquared-api.md` — API shape for `userCreate`.
+
+NFFADI (`required=True`) **never** calls `userCreate`; missing users are rejected at login.
 
 **Admin responsibility:** The `GroupTenantMapping` for every tenant a user belongs to must
 be configured **before** the user's first login attempt. If the mapping does not exist at

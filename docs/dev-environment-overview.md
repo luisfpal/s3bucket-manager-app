@@ -191,7 +191,7 @@ This replaced the local Stencil registry (`registry.stencil.com:5000`) used in t
 
 ### GitHub Actions Runners (ARC)
 
-The repository includes a CI/CD pipeline (`.github/workflows/dev-deploy.yml`) that automatically builds and deploys the application when code is pushed to the `dev` branch.
+The repository includes a CI/CD pipeline (`.github/workflows/ci.yml`) that runs tests on every push/PR and automatically builds and deploys to the dev cluster when code is pushed to the `dev` branch.
 
 The pipeline has two jobs:
 

@@ -26,7 +26,6 @@ function BucketsView() {
   const [deleteTarget, setDeleteTarget] = useState<AdminBucket | null>(null)
   const [confirmText, setConfirmText] = useState('')
   const [deleteError, setDeleteError] = useState<string | null>(null)
-  const [forceDeleting, setForceDeleting] = useState(false)
   const [activeTenant, setActiveTenant] = useState<string | null>(null)
   const [sortField, setSortField] = useState<SortField>('size_bytes')
   const [sortDir, setSortDir] = useState<SortDir>('desc')
@@ -58,26 +57,9 @@ function BucketsView() {
       setDeleteTarget(null)
       setConfirmText('')
     } catch (err: unknown) {
-      setConfirmText('')
       setDeleteError(getApiError(err, 'Delete failed'))
     } finally {
       setDeleting(null)
-    }
-  }
-
-  const handleForceDelete = async () => {
-    if (!deleteTarget) return
-    try {
-      setForceDeleting(true)
-      await adminAPI.deleteBucket(deleteTarget.id, true)
-      setBuckets((prev) => prev.filter((b) => b.id !== deleteTarget.id))
-      setDeleteTarget(null)
-      setConfirmText('')
-      setDeleteError(null)
-    } catch (err: unknown) {
-      setDeleteError(getApiError(err, 'Force delete failed'))
-    } finally {
-      setForceDeleting(false)
     }
   }
 
@@ -225,7 +207,12 @@ function BucketsView() {
                       )}
                     </td>
                     <td>{b.tenant_code}</td>
-                    <td><span className={`admin-type-badge admin-type-${b.bucket_type}`}>{b.bucket_type}</span></td>
+                    <td>
+                      <span className={`admin-type-badge admin-type-${b.bucket_type}`}>{b.bucket_type}</span>
+                      {b.is_orphan && (
+                        <span className="admin-orphan-badge">Orphan</span>
+                      )}
+                    </td>
                     <td>{formatSize(b.size_bytes)}</td>
                     <td>{b.num_objects}</td>
                     <td>{b.shares_count}</td>
@@ -249,7 +236,16 @@ function BucketsView() {
                           {permsLoading ? (
                             <span style={{ color: '#94a3b8' }}>Loading access...</span>
                           ) : perms.length === 0 ? (
-                            <span style={{ color: '#94a3b8' }}>No access records</span>
+                            <div style={{ color: '#94a3b8' }}>
+                              {b.is_orphan ? (
+                                <span>
+                                  Orphan bucket — exists in RGW but was not created via the webapp.
+                                  Delete here or via RGWSquared bucketDelete.
+                                </span>
+                              ) : (
+                                <span>No access records</span>
+                              )}
+                            </div>
                           ) : (
                             <div>
                               <div style={{ fontWeight: 600, marginBottom: '0.3rem', color: '#475569' }}>
@@ -257,14 +253,12 @@ function BucketsView() {
                               </div>
                               {perms.map((p) => (
                                 <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.2rem 0', borderBottom: '1px solid #e2e8f0' }}>
-                                  <span>
+                                  <span className="admin-user-inline">
                                     <span style={{ fontWeight: p.permission === 'owner' ? 600 : 400 }}>
                                       {p.ceph_username}
                                     </span>
                                     {p.email && (
-                                      <span style={{ color: '#94a3b8', marginLeft: '0.4rem', fontSize: '0.75rem' }}>
-                                        {p.email}
-                                      </span>
+                                      <span className="admin-cell-secondary">{p.email}</span>
                                     )}
                                   </span>
                                   <span style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
@@ -334,19 +328,19 @@ function BucketsView() {
                 <p style={{ margin: '0 0 0.4rem', fontWeight: 600, color: '#92400e', fontSize: '0.88rem' }}>
                   Delete failed
                 </p>
-                <p style={{ margin: '0 0 0.6rem', color: '#78350f', fontSize: '0.83rem' }}>
+                <p style={{ margin: '0 0 0.75rem', color: '#78350f', fontSize: '0.83rem' }}>
                   {deleteError}
                 </p>
                 <p style={{ margin: '0 0 0.75rem', color: '#78350f', fontSize: '0.83rem' }}>
-                  This option is only safe when the bucket no longer exists in storage. It removes the database record without touching object storage.
+                  Storage must be removed through RGWSquared before the database record can be deleted. Fix RGWSquared connectivity if needed, then retry.
                 </p>
                 <button
-                  className="button-delete-small"
-                  disabled={confirmText !== deleteTarget.name || forceDeleting}
-                  onClick={handleForceDelete}
+                  className="button-primary"
+                  disabled={confirmText !== deleteTarget.name || deleting === deleteTarget.id}
+                  onClick={handleDeleteConfirm}
                   style={{ width: '100%', padding: '0.5rem' }}
                 >
-                  {forceDeleting ? 'Removing...' : 'Remove DB Record Only'}
+                  {deleting === deleteTarget.id ? 'Retrying...' : 'Retry delete'}
                 </button>
               </div>
             )}

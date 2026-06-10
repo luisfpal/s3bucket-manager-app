@@ -31,7 +31,6 @@ class UserSerializer(serializers.ModelSerializer):
             "orcid",
             "profile_picture_url",
             "is_approved",
-            "is_staff",
             "date_joined",
         ]
         read_only_fields = fields

@@ -13,7 +13,7 @@ from storage.views import (
     health_check,
     tenant_document,
     BucketViewSet,
-    admin_login,
+    admin_exchange_token,
     admin_permissions,
     admin_buckets,
     admin_bucket_detail,
@@ -45,7 +45,7 @@ urlpatterns = [
     path("api/health/", health_check, name="health_check"),
     # API documentation — access controlled by SPECTACULAR_SETTINGS['SERVE_PERMISSIONS']:
     # open in dev (DEBUG=True), restricted to is_staff in production (DEBUG=False).
-    # Access in prod: log in at /admin/login (React panel) — sets session cookie; navigate to /api/docs/ directly.
+    # Access in prod: log in at /admin/login via Authentik — sets session cookie; navigate to /api/docs/ directly.
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
     path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
     path("api/redoc/", SpectacularRedocView.as_view(url_name="schema"), name="redoc"),
@@ -56,7 +56,7 @@ urlpatterns = [
     path("api/auth/select-tenant/", select_tenant, name="select_tenant"),
     path("api/auth/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
     path("api/auth/tenant-document/", tenant_document, name="tenant_document"),
-    path("api/admin/login/", admin_login, name="admin_login"),
+    path("api/admin/auth/token/", admin_exchange_token, name="admin_exchange_token"),
     path("api/admin/permissions/", admin_permissions, name="admin_permissions"),
     path("api/admin/buckets/", admin_buckets, name="admin_buckets"),
     path(

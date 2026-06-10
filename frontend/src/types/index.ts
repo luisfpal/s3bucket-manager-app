@@ -17,7 +17,6 @@ export interface User {
   is_staff: boolean;
   date_joined: string;
   tenants?: TenantInfo[];
-  is_admin?: boolean;
 }
 
 export interface TenantInfo {
@@ -122,6 +121,7 @@ export interface AdminBucket {
   display_name: string;
   tenant_code: string | null;
   bucket_type: 'proposal' | 'local';
+  is_orphan: boolean;
   owner_name: string | null;
   is_deletable: boolean;
   shares_count: number;

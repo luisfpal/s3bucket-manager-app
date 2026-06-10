@@ -3,7 +3,7 @@
 from .auth import exchange_token, current_user, select_tenant, health_check, tenant_document
 from .buckets import BucketViewSet
 from .admin import (
-    admin_login,
+    admin_exchange_token,
     admin_permissions,
     admin_buckets,
     admin_bucket_detail,
@@ -34,7 +34,7 @@ __all__ = [
     "health_check",
     "tenant_document",
     "BucketViewSet",
-    "admin_login",
+    "admin_exchange_token",
     "admin_permissions",
     "admin_buckets",
     "admin_bucket_detail",

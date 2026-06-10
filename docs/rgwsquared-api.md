@@ -414,8 +414,10 @@ Example response:
 Delete order:
 
 1. call RGWSquared,
-2. wait for success,
+2. wait for success (or a definitive already-absent response from RGWSquared),
 3. delete Django metadata.
+
+Bucket Explorer does not offer a database-only delete. If `bucketDelete` fails because RGWSquared cannot reach Ceph, fix RGWSquared connectivity and retry — do not remove the Django row alone.
 
 ## NFFADI CSV Upload
 

@@ -59,6 +59,7 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     # Social auth middleware for OAuth2 state management
     "social_django.middleware.SocialAuthExceptionMiddleware",
+    "storage.middleware.OAuthNextValidationMiddleware",
     "storage.middleware.OAuthExceptionRedirectMiddleware",
 ]
 
@@ -152,7 +153,7 @@ REST_FRAMEWORK = {
         "rest_framework.parsers.FormParser",
     ),
     "DEFAULT_THROTTLE_RATES": {
-        "admin_login": os.getenv("ADMIN_LOGIN_THROTTLE_RATE", "5/min"),
+        "admin_exchange": os.getenv("ADMIN_LOGIN_THROTTLE_RATE", "5/min"),
     },
     # Tell drf-spectacular to use the AutoSchema class for generating OpenAPI descriptions.
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
@@ -173,8 +174,9 @@ SPECTACULAR_SETTINGS = {
         "All bucket endpoints require an `X-Tenant-ID` header with the active tenant ID.\n"
         "Obtain the tenant ID from the `tenants` array in the `/auth/token/` response.\n\n"
         "## Admin endpoints\n"
-        "Admin endpoints (`/api/admin/*`) use a separate JWT obtained from `POST /api/admin/login/`.\n"
-        "The admin user is the Django superuser (`DJANGO_SUPERUSER_USERNAME`)."
+        "Admin endpoints (`/api/admin/*`) use a separate JWT obtained from "
+        "`GET /api/admin/auth/token/` after Authentik OAuth login at `/admin/login`.\n"
+        "The user must belong to the Authentik group configured in `AUTHENTIK_ADMIN_GROUP`."
     ),
     "VERSION": "1.0.0",
     "SERVE_INCLUDE_SCHEMA": False,
@@ -184,9 +186,9 @@ SPECTACULAR_SETTINGS = {
     "SCHEMA_PATH_PREFIX": "/api/",
     # Access control for the schema and docs endpoints:
     # - DEV (DEBUG=True): open access — any visitor can read the schema
-    # - PROD (DEBUG=False): restricted to is_staff users (Django superuser only)
+    # - PROD (DEBUG=False): restricted to is_staff users (Authentik admin group)
     #   This prevents the full endpoint map from being public attack-surface intelligence.
-    #   Access: POST /api/admin/login/ → get JWT → use "Authorize" button in Swagger UI.
+    #   Access: /admin/login → Authentik → admin JWT → use "Authorize" in Swagger UI.
     "SERVE_PERMISSIONS": (
         ["rest_framework.permissions.AllowAny"]
         if DEBUG
@@ -211,7 +213,11 @@ SIMPLE_JWT = {
 
 AUTHENTICATION_BACKENDS = (
     "storage.backends.AuthentikOAuth2",
-    "django.contrib.auth.backends.ModelBackend",
+)
+
+AUTHENTIK_ADMIN_GROUP = require_non_debug_env(
+    "AUTHENTIK_ADMIN_GROUP",
+    os.getenv("AUTHENTIK_ADMIN_GROUP", "buckets-explorer-admin"),
 )
 
 AUTHENTIK_URL = os.getenv("AUTHENTIK_URL", "http://authentik-service:9000")
@@ -261,6 +267,7 @@ SOCIAL_AUTH_PIPELINE = (
     "social_core.pipeline.social_auth.load_extra_data",
     "social_core.pipeline.user.user_details",
     "storage.pipeline.extract_tenant_info",
+    "storage.pipeline.persist_authentik_groups",
     "storage.pipeline.log_user_login",
 )
 

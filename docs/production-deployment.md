@@ -64,11 +64,12 @@ Use `k8s/env/dev/app-secrets.yaml` as a template for your production Secret. Gen
 | `oidc-client-secret` | From the Authentik admin |
 | `rgwsquared-username` | From the RGWSquared admin |
 | `rgwsquared-password` | From the RGWSquared admin |
-| `django-superuser-password` | Choose a strong initial password; change it immediately after first login |
 
 Store your production files outside the repository. `k8s/env/dev/*.local.yaml` is gitignored for exactly this reason — use the same pattern locally.
 
 ### 2. Apply the manifests
+
+Production operators with access only to the `bucket-explorer` namespace apply **`k8s/manifests/app/`** and their own ConfigMap/Secret overlays. Do **not** apply `k8s/manifests/infra/` or `k8s/env/prod/infra-secrets.yaml` — Authentik is external and administered outside this repository.
 
 Apply in order. Each step waits for its dependency before the next one starts.
 
@@ -93,13 +94,15 @@ kubectl apply -f k8s/manifests/app/03-frontend.yaml
 kubectl rollout status deployment/frontend -n bucket-explorer
 ```
 
-Backend startup runs Django migrations, loads UO mapping fixtures, creates the superuser, and collects static files automatically. Watch the logs during the first deploy to confirm each step completes cleanly before gunicorn starts:
+Set `AUTHENTIK_ADMIN_GROUP` in your production ConfigMap (default: `buckets-explorer-admin`) and assign admin users to that group in Authentik.
+
+Backend startup runs Django migrations, loads UO mapping fixtures, purges legacy local staff users, and collects static files automatically. Watch the logs during the first deploy to confirm each step completes cleanly before gunicorn starts:
 
 ```bash
 kubectl logs -n bucket-explorer deployment/backend -f
 ```
 
-Expected sequence: `migrate` → `load_uo_mappings` → `ensure_superuser` → `collectstatic` → gunicorn listening on port 8000.
+Expected sequence: `migrate` → `load_uo_mappings` → `purge_local_staff_users` → `collectstatic` → gunicorn listening on port 8000.
 
 ### 3. Configure Ingress
 
@@ -119,7 +122,7 @@ Only `frontend-service` needs to be externally accessible. The backend is proxie
 | Check | Expected result |
 |---|---|
 | `curl https://<domain>/api/health/` | `{"status": "ok"}` |
-| `https://<domain>/admin/login` | Admin panel loads; log in with superuser credentials |
+| `https://<domain>/admin/login` | Admin panel loads; log in with Authentik (admin group member) |
 | Click "Login with Authentik" | OIDC redirect to Authentik, JWT returned after login |
 | Activate a tenant in admin panel | Buckets and users sync from RGWSquared |
 
@@ -172,3 +175,215 @@ The manifest resource requests are calibrated for the development environment. P
 | Frontend (nginx) | 50m / 100m CPU · 64Mi / 128Mi RAM | Static file server; rarely the bottleneck |
 
 Edit the `resources:` blocks in `k8s/manifests/app/02-backend.yaml` and `k8s/manifests/app/01-django-postgres.yaml` before applying in production. The `02-backend.yaml` manifest includes commented production sizing guidance inline.
+
+---
+
+## Production mental model
+
+You typically own only the `bucket-explorer` namespace. Cluster admins own Authentik, DNS, TLS, and public routing.
+
+| Service | Type | Purpose |
+| --- | --- | --- |
+| `frontend-service` | ClusterIP | Public traffic should route here (port 80) |
+| `backend-service` | ClusterIP | Internal API; reached via frontend nginx |
+| `django-postgres` | ClusterIP | Application PostgreSQL |
+
+Storage boundaries: Django holds metadata; RGWSquared owns bucket policy; Ceph RGW stores objects.
+
+**Golden rule:** every `kubectl apply` is followed by a verification check. If a check fails, stop and fix before continuing.
+
+Run `./k8s/app.sh verify` (or confirm CI is green) **before** building images for production.
+
+---
+
+## Prepare production configuration
+
+Create `k8s/env/prod/app-secrets.local.yaml` and `k8s/env/prod/backend-config.local.yaml` outside Git (mode `600`). Use `k8s/env/prod/*.yaml` templates as starting points.
+
+### Expected secret keys
+
+```text
+database-password
+django-secret-key
+oidc-client-secret
+rgwsquared-password
+rgwsquared-username
+```
+
+Admin access uses **Authentik** (`AUTHENTIK_ADMIN_GROUP` in the ConfigMap, default `buckets-explorer-admin`). There is no local Django admin password secret.
+
+### Preflight checks
+
+```bash
+export KUBECONFIG=/absolute/path/to/prod-kubeconfig.yaml
+export NS=bucket-explorer
+
+kubectl config current-context
+kubectl get ns "$NS"
+kubectl auth can-i create deployments -n "$NS"
+
+chmod 600 k8s/env/prod/app-secrets.local.yaml k8s/env/prod/backend-config.local.yaml
+
+# No unfilled placeholders
+grep -q "REPLACE_WITH_PROD" k8s/env/prod/backend-config.local.yaml && echo "FAIL" || echo "OK"
+
+kubectl apply --dry-run=client --validate=false -f k8s/env/prod/app-secrets.local.yaml
+kubectl apply --dry-run=client --validate=false -f k8s/env/prod/backend-config.local.yaml
+```
+
+---
+
+## Updating after code changes
+
+Changing source files does not affect running pods. You must **build a new image → push → restart** the deployment.
+
+### Decision table
+
+| Change | Rebuild image? | Action |
+| --- | --- | --- |
+| Python/Django code, migrations | Backend | Build backend → push → `kubectl rollout restart deployment/backend` |
+| React/TypeScript or `nginx.conf` | Frontend | Build frontend → push → restart frontend |
+| Both | Both | Build and restart both |
+| ConfigMap env vars only | No | `kubectl apply` ConfigMap → restart backend |
+| Secret values (except DB password) | No | `kubectl apply` Secret → restart backend |
+| `database-password` | No | Change live PostgreSQL role password, apply Secret, restart (see below) |
+
+`imagePullPolicy: Always` on deployments ensures `rollout restart` pulls the latest `:latest` digest from the registry.
+
+### Build and push (example)
+
+```bash
+export NS=bucket-explorer
+
+# Authenticate to ghcr.io (PAT needs write:packages)
+gh auth token | podman login ghcr.io -u <owner> --password-stdin
+
+podman build -t ghcr.io/<owner>/buckets-explorer-backend:latest \
+  -f backend/Containerfile backend/
+podman push ghcr.io/<owner>/buckets-explorer-backend:latest
+
+kubectl rollout restart deployment/backend -n "$NS"
+kubectl rollout status deployment/backend -n "$NS" --timeout=300s
+kubectl logs -n "$NS" deployment/backend --tail=50
+```
+
+Expected backend logs: `migrate` → `load_uo_mappings` → `purge_local_staff_users` → `collectstatic` → gunicorn.
+
+Frontend build compiles React inside the container (no local Node.js required):
+
+```bash
+podman build -t ghcr.io/<owner>/buckets-explorer-frontend:latest \
+  -f frontend/Containerfile frontend/
+podman push ghcr.io/<owner>/buckets-explorer-frontend:latest
+kubectl rollout restart deployment/frontend -n "$NS"
+```
+
+### Post-update verification
+
+```bash
+export APP_HOST=<production-domain>
+
+curl -fsS  "https://$APP_HOST/api/health/"
+curl -fsSI "https://$APP_HOST/api/oauth/login/authentik/" | grep -i location
+```
+
+- Health returns `{"status":"ok"}`.
+- OIDC `Location` header should show `redirect_uri=https://` (not `http://`).
+- Admin Panel: open `/admin/login`, sign in with Authentik (member of admin group).
+
+---
+
+## Routine updates (Class A and B)
+
+Most production changes are safe rollouts that keep the PostgreSQL PVC intact.
+
+| Class | Examples | Data risk |
+| --- | --- | --- |
+| **A** | ConfigMap/Secret change, OIDC rotation | None — restart backend after apply |
+| **B** | New backend/frontend image, migration-only schema change | Low — PVC survives; run post-deploy health checks |
+
+After any Class A or B update:
+
+1. Confirm pods are `Running` and readiness probes pass.
+2. Hit `/api/health/` on the public URL.
+3. Spot-check user login and Admin Panel sync.
+
+See [storage-cache-and-redeploy.md](storage-cache-and-redeploy.md) for the three-layer model.
+
+---
+
+## After database loss (Class C)
+
+Deleting the PostgreSQL PVC (`app.sh cleanup` in dev, or an intentional prod reset) wipes Django metadata only. Ceph RGW and RGWSquared keep existing buckets and policies.
+
+After redeploy:
+
+1. Run **Admin Panel → Sync → Refresh local cache** for each tenant.
+2. Review buckets flagged **ORPHAN** in the admin Buckets view — these exist in RGW but are **not** visible on user dashboards.
+3. Delete orphans that should not exist (admin **Delete** calls RGWSquared `bucketDelete`).
+4. Tell researchers to recreate needed buckets through the webapp — sync does not restore user access for manual RGW buckets.
+5. Do **not** expect Django to auto-delete orphan Ceph buckets without an explicit admin delete.
+
+Full semantics: [storage-cache-and-redeploy.md](storage-cache-and-redeploy.md).
+
+---
+
+## Updating secrets and configuration
+
+Kubernetes injects Secret/ConfigMap values when a pod **starts**. After `kubectl apply`, restart the backend:
+
+```bash
+kubectl apply -f k8s/env/prod/app-secrets.local.yaml
+kubectl apply -f k8s/env/prod/backend-config.local.yaml
+kubectl rollout restart deployment/backend -n bucket-explorer
+kubectl rollout status deployment/backend -n bucket-explorer --timeout=300s
+```
+
+| Change | Notes |
+| --- | --- |
+| `django-secret-key` | Invalidates existing JWTs/sessions; plan a maintenance window |
+| `oidc-client-secret` | Verify OIDC login after rollout |
+| `rgwsquared-*` | Verify tenant sync in admin panel after rollout |
+| `database-password` | Update PostgreSQL role password first, then apply Secret and restart. Do not delete the PVC for routine rotation |
+
+Default to **preserving PostgreSQL data**. Only recreate the database PVC for an intentional fresh install with explicit data-loss approval.
+
+---
+
+## Database migrations
+
+The backend pod CMD runs `python manage.py migrate --noinput` before gunicorn starts. The readiness probe blocks traffic until gunicorn listens.
+
+- **Additive migrations** (new tables/columns): rolling restart is usually safe.
+- **Destructive migrations** (drop/rename): use a two-phase deploy—deploy code that no longer uses the old schema, then deploy the migration.
+
+---
+
+## Troubleshooting (quick reference)
+
+| Symptom | Likely cause | Action |
+| --- | --- | --- |
+| Backend CrashLoopBackOff after secret change | Invalid config or migration error | `kubectl logs deployment/backend --previous` |
+| Public URL 404 but port-forward works | Routing/DNS/TLS | Ask admins to route domain to `frontend-service:80` |
+| OIDC `redirect_uri=http://` | `AUTHENTIK_EXTERNAL_URL` wrong | Fix ConfigMap, restart backend |
+| Admin login 403 | User not in `AUTHENTIK_ADMIN_GROUP` | Add user to Authentik group; check ConfigMap value |
+| RGWSquared sync fails | Wrong credentials or URL | Check Secret and `RGWSQUARED_URL` in ConfigMap |
+
+---
+
+## Final production checklist
+
+- [ ] `KUBECONFIG` points to production cluster
+- [ ] `app-secrets.local.yaml` and `backend-config.local.yaml` exist, mode `600`, not committed
+- [ ] No `REPLACE_WITH_PROD` placeholders remain
+- [ ] `AUTHENTIK_ADMIN_GROUP` set; admin users assigned in Authentik
+- [ ] PostgreSQL, backend, frontend pods `1/1 Running`
+- [ ] `/api/health/` OK via public URL
+- [ ] User OIDC login and Admin Panel Authentik login work
+- [ ] RGWSquared sync and a disposable test-tenant smoke test pass
+
+---
+
+## Automated production deploy (future)
+
+Production clusters often cannot host self-hosted GitHub runners. The recommended path when automation is needed: GitHub managed runner + scoped kubeconfig secret + manual approval gate on `main`. Dev automation is documented in [testing-and-ci.md](testing-and-ci.md).

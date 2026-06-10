@@ -15,6 +15,31 @@ class RGWSquaredError(RuntimeError):
     """User-facing RGWSquared failure message."""
 
 
+def rgw_bucket_already_absent(error) -> bool:
+    """True when RGWSquared reports the bucket is already gone from policy/storage."""
+    err_str = str(error).lower()
+    return (
+        "not found" in err_str
+        or "does not exist" in err_str
+        or "null" in err_str
+    )
+
+
+def delete_bucket_via_rgw(client, structure, bucket_name):
+    """Delete through RGWSquared; tolerate already-absent buckets after the RGW call."""
+    try:
+        client.delete_bucket(structure, bucket_name)
+    except RGWSquaredError as exc:
+        if rgw_bucket_already_absent(exc):
+            logger.warning(
+                "Bucket %s already absent in RGWSquared (%s); proceeding with DB cleanup",
+                bucket_name,
+                exc,
+            )
+            return
+        raise
+
+
 class RGWSquaredClient:
     """Thin wrapper around the RGWSquared REST API."""
 

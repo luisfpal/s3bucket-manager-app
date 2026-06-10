@@ -1,6 +1,6 @@
 """Admin API views — purpose-built React admin backend.
 
-All endpoints require is_staff=True (except admin login).
+All endpoints require AdminPanelPermission (except admin OAuth token exchange).
 """
 
 import base64
@@ -8,16 +8,17 @@ import csv
 import io
 import logging
 
-from django.contrib.admin.models import LogEntry, DELETION
-from django.contrib.auth import authenticate, login as django_login
-from django.contrib.contenttypes.models import ContentType
+from django.contrib.auth import login as django_login
 from django.db.models import Count, Q, Sum
+from drf_spectacular.utils import extend_schema, OpenApiResponse
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes, throttle_classes
-from rest_framework.permissions import IsAdminUser, AllowAny
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.throttling import SimpleRateThrottle
-from rest_framework_simplejwt.tokens import RefreshToken
+
+from storage.auth_permissions import AdminPanelPermission
+from storage.tokens import AdminRefreshToken
 
 from storage.models import (
     Tenant,
@@ -37,7 +38,11 @@ from storage.services.s3_ops import (
     get_bucket_stats_for_tenant,
 )
 from storage.services.sync_service import refresh_local_cache
-from storage.services.rgw_squared import RGWSquaredClient, RGWSquaredError
+from storage.services.rgw_squared import (
+    RGWSquaredClient,
+    RGWSquaredError,
+    delete_bucket_via_rgw,
+)
 from storage.access import (
     NFFADI_AUTHENTIK_GROUP,
     is_nffadi_tenant,
@@ -48,12 +53,11 @@ from storage.access import (
 logger = logging.getLogger(__name__)
 
 
-class AdminLoginThrottle(SimpleRateThrottle):
-    scope = "admin_login"
+class AdminExchangeThrottle(SimpleRateThrottle):
+    scope = "admin_exchange"
 
     def get_cache_key(self, request, view):
-        username = request.data.get("username", "")
-        ident = f"{self.get_ident(request)}:{username.strip().lower() or 'unknown'}"
+        ident = self.get_ident(request)
         return self.cache_format % {"scope": self.scope, "ident": ident}
 
 
@@ -83,43 +87,66 @@ def _error_response(message, response_status=status.HTTP_500_INTERNAL_SERVER_ERR
     return Response({"error": str(message)}, status=response_status)
 
 
-@api_view(["POST"])
+@extend_schema(
+    summary="Exchange OAuth2 session for admin panel JWT",
+    description=(
+        "Called by the admin frontend after Authentik OAuth completes with "
+        "`?next=/admin/auth/callback`. Requires membership in AUTHENTIK_ADMIN_GROUP."
+    ),
+    responses={
+        200: OpenApiResponse(description="Admin JWT tokens"),
+        401: OpenApiResponse(description="No active OAuth2 session"),
+        403: OpenApiResponse(description="User is not in the Authentik admin group"),
+    },
+    tags=["Admin"],
+)
+@api_view(["GET"])
 @permission_classes([AllowAny])
-@throttle_classes([AdminLoginThrottle])
-def admin_login(request):
-    """Authenticate admin via username/password, return JWT."""
-    username = request.data.get("username", "").strip()
-    password = request.data.get("password", "")
+@throttle_classes([AdminExchangeThrottle])
+def admin_exchange_token(request):
+    """Exchange OAuth2 session for admin-panel JWT tokens."""
     client_ip = _client_ip(request)
 
-    if not username or not password:
-        logger.warning(
-            "Admin login rejected: missing credentials username=%s ip=%s",
-            username or "<blank>",
-            client_ip,
-        )
+    if not request.user.is_authenticated:
         return Response(
-            {"error": "Username and password required"},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-
-    user = authenticate(username=username, password=password)
-    if not user or not user.is_staff:
-        logger.warning(
-            "Admin login failed username=%s ip=%s reason=%s",
-            username,
-            client_ip,
-            "bad_credentials" if not user else "not_staff",
-        )
-        return Response(
-            {"error": "Invalid credentials or insufficient privileges"},
+            {"error": "No active session. Please login via Authentik first."},
             status=status.HTTP_401_UNAUTHORIZED,
         )
 
-    logger.info("Admin login succeeded username=%s ip=%s", username, client_ip)
+    user = request.user
+    user.refresh_from_db()
+
+    if not user.can_access_system:
+        logger.warning(
+            "Admin exchange rejected username=%s ip=%s reason=pending_approval",
+            user.username,
+            client_ip,
+        )
+        return Response(
+            {"error": "Account pending approval."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    if not user.is_staff:
+        logger.warning(
+            "Admin exchange rejected username=%s ip=%s reason=not_staff",
+            user.username,
+            client_ip,
+        )
+        return Response(
+            {"error": "Account is not authorized for admin panel access."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    logger.info(
+        "Admin exchange succeeded username=%s ip=%s is_staff=%s",
+        user.username,
+        client_ip,
+        user.is_staff,
+    )
     django_login(request, user)
     request.session.set_expiry(86400)  # 24h: docs access outlives OAuth handshake sessions (300s)
-    refresh = RefreshToken.for_user(user)
+    refresh = AdminRefreshToken.for_admin_user(user)
     return Response(
         {
             "access": str(refresh.access_token),
@@ -136,7 +163,7 @@ def _clean_email(email):
 
 
 @api_view(["GET"])
-@permission_classes([IsAdminUser])
+@permission_classes([AdminPanelPermission])
 def admin_permissions(request):
     """All bucket permissions — used by BucketsView expanded access."""
     perms = BucketPermission.objects.select_related(
@@ -181,8 +208,19 @@ def admin_permissions(request):
     )
 
 
+def _bucket_is_orphan(bucket):
+    """True when bucket exists in RGW but was not created via the webapp."""
+    if bucket.bucket_type == Bucket.PROPOSAL:
+        return False
+    return not BucketPermission.objects.filter(
+        bucket=bucket,
+        permission="owner",
+        source="local",
+    ).exists()
+
+
 @api_view(["GET"])
-@permission_classes([IsAdminUser])
+@permission_classes([AdminPanelPermission])
 def admin_buckets(request):
     """All buckets with storage stats from RGW."""
     try:
@@ -210,6 +248,7 @@ def admin_buckets(request):
                     "display_name": b.display_name,
                     "tenant_code": b.tenant.code if b.tenant else None,
                     "bucket_type": b.bucket_type,
+                    "is_orphan": _bucket_is_orphan(b),
                     "owner_name": b.owner.display_name
                     if b.owner
                     else (b.tenant.code if b.tenant else None),
@@ -228,7 +267,7 @@ def admin_buckets(request):
 
 
 @api_view(["GET", "DELETE"])
-@permission_classes([IsAdminUser])
+@permission_classes([AdminPanelPermission])
 def admin_bucket_detail(request, bucket_id):
     """Bucket detail or delete. DELETE only if is_deletable=True."""
     try:
@@ -242,28 +281,14 @@ def admin_bucket_detail(request, bucket_id):
                 {"error": "This bucket cannot be deleted"},
                 status=status.HTTP_403_FORBIDDEN,
             )
-        force = request.query_params.get("force", "").lower() == "true"
         try:
             client = _get_sync_client()
             ensure_structure_initialized(bucket.tenant, client=client)
-            client.delete_bucket(_structure_name(bucket.tenant), bucket.name)
+            delete_bucket_via_rgw(
+                client, _structure_name(bucket.tenant), bucket.name
+            )
         except RGWSquaredError as e:
-            err_str = str(e).lower()
-            bucket_missing = "null" in err_str or "not found" in err_str or "does not exist" in err_str
-            if not force or not bucket_missing:
-                return _error_response(e, status.HTTP_400_BAD_REQUEST)
-            logger.warning(
-                "Force-deleting bucket %s from DB despite RGWSquared error: %s",
-                bucket.name, e,
-            )
-            LogEntry.objects.log_action(
-                user_id=request.user.pk,
-                content_type_id=ContentType.objects.get_for_model(Bucket).pk,
-                object_id=bucket.pk,
-                object_repr=bucket.name,
-                action_flag=DELETION,
-                change_message=f"Force-deleted: RGWSquared error bypassed: {e}",
-            )
+            return _error_response(e, status.HTTP_400_BAD_REQUEST)
         except RuntimeError as e:
             return _error_response(e, status.HTTP_503_SERVICE_UNAVAILABLE)
         except Exception as e:
@@ -298,7 +323,7 @@ def admin_bucket_detail(request, bucket_id):
 
 
 @api_view(["DELETE"])
-@permission_classes([IsAdminUser])
+@permission_classes([AdminPanelPermission])
 def admin_delete_file(request, bucket_id, file_key):
     """Delete a file from any bucket (admin only)."""
     try:
@@ -327,7 +352,7 @@ def admin_delete_file(request, bucket_id, file_key):
 
 
 @api_view(["GET"])
-@permission_classes([IsAdminUser])
+@permission_classes([AdminPanelPermission])
 def admin_users(request):
     """All users with tenant membership info and file upload summary."""
     try:
@@ -383,7 +408,7 @@ def admin_users(request):
 
 
 @api_view(["GET"])
-@permission_classes([IsAdminUser])
+@permission_classes([AdminPanelPermission])
 def admin_tenants(request):
     """All tenants with member/bucket counts and storage."""
     try:
@@ -442,7 +467,7 @@ def admin_tenants(request):
 
 
 @api_view(["GET"])
-@permission_classes([IsAdminUser])
+@permission_classes([AdminPanelPermission])
 def admin_tenant_activation(request):
     """Operator activation status for every RGWSquared structure.
 
@@ -605,7 +630,7 @@ def admin_tenant_activation(request):
 
 
 @api_view(["GET", "POST"])
-@permission_classes([IsAdminUser])
+@permission_classes([AdminPanelPermission])
 def admin_group_mappings(request):
     """List or create group-tenant mappings."""
     if request.method == "GET":
@@ -705,7 +730,7 @@ def admin_group_mappings(request):
 
 
 @api_view(["DELETE"])
-@permission_classes([IsAdminUser])
+@permission_classes([AdminPanelPermission])
 def admin_group_mapping_delete(request, mapping_id):
     """Delete a group-tenant mapping."""
     deleted, _ = GroupTenantMapping.objects.filter(id=mapping_id).delete()
@@ -717,7 +742,7 @@ def admin_group_mapping_delete(request, mapping_id):
 
 
 @api_view(["GET"])
-@permission_classes([IsAdminUser])
+@permission_classes([AdminPanelPermission])
 def admin_available_tenants(request):
     """Structures from RGWSquared, cross-referenced with existing tenants."""
     from django.conf import settings
@@ -759,7 +784,7 @@ def admin_available_tenants(request):
 
 
 @api_view(["GET"])
-@permission_classes([IsAdminUser])
+@permission_classes([AdminPanelPermission])
 def admin_uo_mappings(request):
     """Read-only UO mapping list."""
     mappings = UOMapping.objects.select_related("tenant").order_by(
@@ -779,7 +804,7 @@ def admin_uo_mappings(request):
 
 
 @api_view(["POST"])
-@permission_classes([IsAdminUser])
+@permission_classes([AdminPanelPermission])
 def admin_sync_refresh(request):
     """Refresh local cache for a tenant. Accepts tenant_id or structure_code."""
     structure_code = request.data.get("structure_code")
@@ -812,7 +837,7 @@ def admin_sync_refresh(request):
 
 
 @api_view(["POST"])
-@permission_classes([IsAdminUser])
+@permission_classes([AdminPanelPermission])
 def admin_sync_upload_csv(request):
     """Upload instruments CSV to RGWSquared (csvUpload)."""
     csv_file = request.FILES.get("file")
@@ -931,7 +956,7 @@ def admin_sync_upload_csv(request):
 
 
 @api_view(["POST"])
-@permission_classes([IsAdminUser])
+@permission_classes([AdminPanelPermission])
 def admin_sync_update_structure(request):
     """Trigger RGWSquared structureUpdate. Ceph sync is internal to RGWSquared."""
     structure = request.data.get("structure", "NFFADI")
@@ -947,7 +972,7 @@ def admin_sync_update_structure(request):
 
 
 @api_view(["POST"])
-@permission_classes([IsAdminUser])
+@permission_classes([AdminPanelPermission])
 def admin_create_tenant(request):
     """Create a Django Tenant record from an existing RGWSquared structure.
 
@@ -1018,7 +1043,7 @@ def admin_create_tenant(request):
 
 
 @api_view(["GET"])
-@permission_classes([IsAdminUser])
+@permission_classes([AdminPanelPermission])
 def admin_membership_files(request, membership_id):
     """File upload history for one tenant-scoped admin account row."""
     try:
@@ -1054,7 +1079,7 @@ def admin_membership_files(request, membership_id):
 
 
 @api_view(["GET", "POST"])
-@permission_classes([IsAdminUser])
+@permission_classes([AdminPanelPermission])
 def admin_file_name_rules(request):
     """List or create file naming rules for a tenant."""
     if request.method == "GET":
@@ -1088,7 +1113,7 @@ def admin_file_name_rules(request):
 
 
 @api_view(["DELETE"])
-@permission_classes([IsAdminUser])
+@permission_classes([AdminPanelPermission])
 def admin_file_name_rule_detail(request, rule_id):
     """Delete a single file naming rule."""
     try:
@@ -1099,7 +1124,7 @@ def admin_file_name_rule_detail(request, rule_id):
 
 
 @api_view(["GET"])
-@permission_classes([IsAdminUser])
+@permission_classes([AdminPanelPermission])
 def admin_file_deviations(request):
     """Users whose uploaded files violate the tenant's naming rules.
 
@@ -1156,7 +1181,7 @@ def admin_file_deviations(request):
 
 
 @api_view(["GET", "POST", "DELETE"])
-@permission_classes([IsAdminUser])
+@permission_classes([AdminPanelPermission])
 def admin_tenant_document(request, tenant_code):
     """Read, upsert, or delete the markdown document for a tenant."""
     try:
@@ -1221,7 +1246,7 @@ def admin_tenant_document(request, tenant_code):
 
 
 @api_view(["GET"])
-@permission_classes([IsAdminUser])
+@permission_classes([AdminPanelPermission])
 def admin_file_formats(request):
     """Per-tenant file format distribution for storage auditing."""
     tenant_code = request.query_params.get("tenant_code", "").strip()

@@ -319,11 +319,17 @@ def extract_tenant_info(backend, details, response, user=None, *args, **kwargs):
     if not user:
         return None
 
+    from django.conf import settings
     from storage.models import GroupTenantMapping, TenantMembership
 
     # preferred_username is the Ceph subuser name used by RGWSquared.
     ceph_username = response.get("preferred_username") or user.username
     groups = response.get("groups", []) or []
+
+    admin_group = settings.AUTHENTIK_ADMIN_GROUP
+    is_app_admin = bool(admin_group) and admin_group in groups
+    user.is_staff = is_app_admin
+    user.save(update_fields=["is_staff"])
 
     mappings = list(
         GroupTenantMapping.objects.select_related("tenant").filter(
@@ -332,6 +338,12 @@ def extract_tenant_info(backend, details, response, user=None, *args, **kwargs):
         )
     )
     if not mappings:
+        if is_app_admin:
+            logger.info(
+                "Admin-only OAuth login for %s (no tenant group mappings)",
+                user.username,
+            )
+            return {"user": user}
         logger.warning(
             "Login rejected for %s: Authentik groups %r have no matching GroupTenantMapping",
             user.username,
@@ -403,6 +415,12 @@ def extract_tenant_info(backend, details, response, user=None, *args, **kwargs):
     _sync_uo_codes_for_user(user)
 
     if not matched_tenants:
+        if is_app_admin:
+            logger.info(
+                "Admin OAuth login for %s with no activated tenant memberships",
+                user.username,
+            )
+            return {"user": user}
         logger.warning(
             "Login rejected for %s: group mappings matched but no activated tenant remained eligible",
             user.username,
@@ -621,6 +639,31 @@ def _sync_user_buckets_on_login(
             existing.save(update_fields=["permission"])
 
 
+def persist_authentik_groups(backend, details, response, user=None, *args, **kwargs):
+    """Store OIDC group names on the social auth record for auditing and ops."""
+    if not user:
+        return None
+
+    from social_django.models import UserSocialAuth
+
+    groups = response.get("groups", []) or []
+    if isinstance(groups, str):
+        groups = [groups]
+
+    try:
+        social = UserSocialAuth.objects.get(user=user, provider=backend.name)
+    except UserSocialAuth.DoesNotExist:
+        logger.warning("No UserSocialAuth row to persist groups for %s", user.username)
+        return None
+
+    extra = dict(social.extra_data or {})
+    extra["groups"] = list(groups)
+    social.extra_data = extra
+    social.save(update_fields=["extra_data"])
+    logger.info("Persisted Authentik groups for %s: %s", user.username, groups)
+    return None
+
+
 def log_user_login(backend, details, response, user=None, *args, **kwargs):
     """
     Log user login for audit trail.
@@ -640,12 +683,17 @@ def log_user_login(backend, details, response, user=None, *args, **kwargs):
         None
     """
     if user:
+        groups = response.get("groups", []) or []
         logger.info(
-            f"OAuth2 login successful: user={user.username}, "
-            f"external_id={user.external_id}, "
-            f"institution={user.institution}, "
-            f"email={user.email}, "
-            f"idp_source={user.idp_source}"
+            "OAuth2 login successful: user=%s external_id=%s institution=%s "
+            "email=%s idp_source=%s groups=%r is_staff=%s",
+            user.username,
+            user.external_id,
+            user.institution,
+            user.email,
+            user.idp_source,
+            groups,
+            user.is_staff,
         )
     else:
         logger.warning("OAuth2 pipeline completed but user is None")

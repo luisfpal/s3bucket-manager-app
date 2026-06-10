@@ -8,7 +8,8 @@
  * - /dashboard          — tenant-scoped bucket list
  * - /buckets/:id        — bucket detail + file browser
  * - /profile            — user profile
- * - /admin/login        — admin login (separate auth)
+ * - /admin/login        — admin Authentik login
+ * - /admin/auth/callback — admin OAuth → JWT bridge
  * - /admin/*            — admin panel
  */
 
@@ -22,6 +23,7 @@ import NexusViewer from './components/NexusViewer'
 import Profile from './components/Profile'
 import TenantDocPage from './components/TenantDocPage'
 import AdminLogin from './components/admin/AdminLogin'
+import AdminAuthCallback from './components/admin/AdminAuthCallback'
 import AdminLayout from './components/admin/AdminLayout'
 import BucketsView from './components/admin/BucketsView'
 import UsersView from './components/admin/UsersView'
@@ -55,6 +57,7 @@ function App() {
         <Route path="/guide" element={<ProtectedRoute><TenantDocPage /></ProtectedRoute>} />
 
         <Route path="/admin/login" element={<AdminLogin />} />
+        <Route path="/admin/auth/callback" element={<AdminAuthCallback />} />
         <Route path="/admin" element={<AdminLayout />}>
           <Route index element={<Navigate to="/admin/buckets" replace />} />
           <Route path="buckets" element={<BucketsView />} />

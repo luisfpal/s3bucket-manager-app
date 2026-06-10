@@ -32,6 +32,7 @@
 #     ./app.sh restart <comp>      # Restart a deployment without rebuild
 #     ./app.sh cleanup             # Delete bucket-explorer namespace + optional image cleanup
 #     ./app.sh dev-db <action>     # Local PostgreSQL via podman (start|stop|destroy|status)
+#     ./app.sh verify              # Run the same checks as GitHub Actions verify job
 #
 # WHAT EACH SUBCOMMAND DOES (for manual reference):
 #
@@ -518,6 +519,51 @@ show_logs() {
 # Access: establish SSH tunnel + port-forwards for the full login flow
 # ==============================================================================
 
+AUTHENTIK_SERVICE="authentik-service"
+AUTHENTIK_PF_PORT="${AUTHENTIK_PF_PORT:-9000}"
+
+stop_kubectl_port_forward_on_port() {
+    local local_port="$1"
+    local pids
+    pids="$(ss -tlnp 2>/dev/null | awk -v port=":${local_port}" '$4 ~ port { print }' | grep 'kubectl' | grep -oP 'pid=\K[0-9]+' || true)"
+    [ -n "$pids" ] || return 0
+    while read -r pid; do
+        [ -n "$pid" ] || continue
+        kill "$pid" 2>/dev/null || true
+    done <<< "$pids"
+}
+
+infra_authentik_pf_running_on_port() {
+    local local_port="$1"
+    pgrep -f "kubectl port-forward svc/${AUTHENTIK_SERVICE} ${local_port}:.* -n ${INFRA_NAMESPACE}" >/dev/null 2>&1
+}
+
+ensure_authentik_port_forward() {
+    local local_port="$1"
+
+    if infra_authentik_pf_running_on_port "$local_port"; then
+        success "Authentik :${local_port} → $INFRA_NAMESPACE (already running)"
+        return 0
+    fi
+
+    if ss -tlnp 2>/dev/null | grep -q ":${local_port} "; then
+        warn "Port :${local_port} is held by another Authentik port-forward — reclaiming for $INFRA_NAMESPACE"
+        stop_kubectl_port_forward_on_port "$local_port"
+        sleep 0.5
+    fi
+
+    info "Starting Authentik port-forward (:${local_port} → $INFRA_NAMESPACE/authentik-service:9000)..."
+    : > /tmp/pf-authentik.log
+    nohup kubectl port-forward "svc/${AUTHENTIK_SERVICE}" "${local_port}:9000" -n "$INFRA_NAMESPACE" \
+        > /tmp/pf-authentik.log 2>&1 &
+    sleep 1
+    if ss -tlnp 2>/dev/null | grep -q ":${local_port} "; then
+        success "Authentik :${local_port} → $INFRA_NAMESPACE active"
+    else
+        warn "Authentik port-forward may have failed — check /tmp/pf-authentik.log"
+    fi
+}
+
 setup_access() {
     step "Setting up access"
 
@@ -611,21 +657,10 @@ setup_access() {
     fi
 
     # 4. Authentik port-forward — required for the browser to follow OAuth2 redirects
-    #    to localhost:9000. Only started when INFRA_NAMESPACE is set and accessible.
+    #    to localhost:9000. Verify namespace ownership; reclaim :9000 if another
+    #    project's Authentik (e.g. sem-image-classifier) left a stale forward.
     if [ -n "${INFRA_NAMESPACE:-}" ]; then
-        if ! ss -tlnp 2>/dev/null | grep -q ":9000 "; then
-            info "Starting Authentik port-forward (:9000 → $INFRA_NAMESPACE/authentik-service:9000)..."
-            nohup kubectl port-forward svc/authentik-service 9000:9000 -n "$INFRA_NAMESPACE" \
-                > /tmp/pf-authentik.log 2>&1 &
-            sleep 1
-            if ss -tlnp 2>/dev/null | grep -q ":9000 "; then
-                success "Authentik :9000 → active"
-            else
-                warn "Authentik port-forward may have failed — check /tmp/pf-authentik.log"
-            fi
-        else
-            success "Authentik :9000 already running"
-        fi
+        ensure_authentik_port_forward "$AUTHENTIK_PF_PORT"
     else
         info "INFRA_NAMESPACE not set — skipping Authentik port-forward (external Authentik assumed)"
     fi
@@ -714,6 +749,34 @@ run_cleanup() {
 #   cd ../backend && python manage.py migrate && python manage.py runserver
 #
 # ==============================================================================
+
+run_verify() {
+    step "Syntax-checking shell scripts"
+    bash -n "$SCRIPT_DIR/app.sh"
+    bash -n "$SCRIPT_DIR/infra.sh"
+    success "Shell syntax OK"
+
+    step "Installing backend test dependencies"
+    python3 -m pip install --upgrade pip setuptools wheel -q
+    python3 -m pip install "$PROJECT_DIR/backend[dev]" -q
+
+    step "Backend tests with coverage"
+    (
+        cd "$PROJECT_DIR/backend"
+        DJANGO_DEBUG=True python3 -m pytest --cov=storage --cov-report=term-missing -q
+    )
+    success "Backend tests passed"
+
+    step "Frontend production build"
+    (
+        cd "$PROJECT_DIR/frontend"
+        npm run build
+    )
+    success "Frontend build passed"
+
+    echo ""
+    success "All verification checks passed (matches CI verify job)"
+}
 
 dev_db() {
     local action="${1:-help}"
@@ -806,6 +869,7 @@ usage() {
     echo "    restart <comp> Restart a deployment without rebuild"
     echo "    cleanup        Delete $NAMESPACE namespace + optionally clean images from K3s nodes"
     echo "    dev-db <act>   Local PostgreSQL via podman (start|stop|destroy|status)"
+    echo "    verify         Run backend tests + frontend build (same as CI verify job)"
     echo ""
     echo "  Namespace  : $NAMESPACE"
     echo "  Images     : $BACKEND_IMAGE"
@@ -863,6 +927,9 @@ case "$COMMAND" in
         ;;
     dev-db)
         dev_db "${1:-help}"
+        ;;
+    verify)
+        run_verify
         ;;
     *)
         usage

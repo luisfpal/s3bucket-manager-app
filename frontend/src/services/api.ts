@@ -252,6 +252,20 @@ export const bucketAPI = {
     window.URL.revokeObjectURL(url);
   },
 
+  downloadArchive: async (bucketId: number, filename: string): Promise<void> => {
+    const response = await api.get(`/buckets/${bucketId}/download-archive/`, {
+      responseType: 'blob',
+    });
+    const url = window.URL.createObjectURL(new Blob([response.data]));
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', filename.endsWith('.zip') ? filename : `${filename}.zip`);
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
+  },
+
   getAccessList: async (bucketId: number, opts: { signal?: AbortSignal } = {}): Promise<BucketAccessList> => {
     const response = await api.get(`/buckets/${bucketId}/access-list/`, { signal: opts.signal });
     return response.data;
@@ -357,8 +371,13 @@ adminAxios.interceptors.response.use(
 );
 
 export const adminAPI = {
-  login: async (username: string, password: string) => {
-    const response = await axios.post('/api/admin/login/', { username, password });
+  startLogin: () => {
+    adminTokenStore.clear();
+    window.location.href = '/api/oauth/login/authentik/?next=/admin/auth/callback';
+  },
+
+  exchangeToken: async () => {
+    const response = await axios.get('/api/admin/auth/token/');
     return response.data as { access: string; refresh: string; username: string; display_name: string };
   },
 
@@ -384,9 +403,8 @@ export const adminAPI = {
     return response.data;
   },
 
-  deleteBucket: async (id: number, force = false): Promise<void> => {
-    const url = force ? `/buckets/${id}/?force=true` : `/buckets/${id}/`;
-    await adminAxios.delete(url);
+  deleteBucket: async (id: number): Promise<void> => {
+    await adminAxios.delete(`/buckets/${id}/`);
   },
 
   deleteFile: async (bucketId: number, fileKey: string): Promise<void> => {

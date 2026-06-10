@@ -32,6 +32,9 @@ function BucketDetail() {
   const [showShareModal, setShowShareModal] = useState(false)
   const [showAccess, setShowAccess] = useState(false)
   const [viewingFile, setViewingFile] = useState<{ key: string; size: number } | null>(null)
+  const [showNamingRules, setShowNamingRules] = useState(false)
+  const [downloadingArchive, setDownloadingArchive] = useState(false)
+  const [openActionsKey, setOpenActionsKey] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -39,6 +42,20 @@ function BucketDetail() {
     loadData(ac.signal)
     return () => ac.abort()
   }, [id])
+
+  useEffect(() => {
+    if (!openActionsKey) return
+    const closeMenu = () => setOpenActionsKey(null)
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') closeMenu()
+    }
+    document.addEventListener('click', closeMenu)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('click', closeMenu)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [openActionsKey])
 
   // signal is only set by the route-change effect; post-upload/delete reloads
   // run uncancelled because they're user-driven, not navigation-driven.
@@ -134,6 +151,19 @@ function BucketDetail() {
     }
   }
 
+  const handleDownloadArchive = async () => {
+    if (!id || !bucket) return
+    try {
+      setDownloadingArchive(true)
+      await bucketAPI.downloadArchive(parseInt(id), bucket.display_name || bucket.name)
+    } catch (err) {
+      console.error('Archive download failed:', err)
+      setError(getApiError(err, 'Failed to download archive.'))
+    } finally {
+      setDownloadingArchive(false)
+    }
+  }
+
   const handleLeaveBucket = async () => {
     if (!id || !bucket) return
     if (!confirm(`Leave bucket "${bucket.display_name || bucket.name}"? You will lose access.`)) return
@@ -188,6 +218,17 @@ function BucketDetail() {
   const permLabel = (p: string) => p === 'owner' ? 'Owner' : p === 'rw' ? 'Read-Write' : 'Read-Only'
   const permColor = (p: string) => p === 'owner' ? '#2563eb' : p === 'rw' ? '#059669' : '#6b7280'
 
+  const tenantCode = (activeTenant?.code || '').toUpperCase()
+  const isNffadi = tenantCode === 'NFFADI'
+  const isProposal = bucket.bucket_type === 'proposal'
+  const bucketDisplay = bucket.display_name || bucket.name
+  const tenantSlug = tenantCode.toLowerCase()
+  const namingRuleText = isNffadi && isProposal
+    ? `${tenantSlug}-${bucketDisplay}-{uo-code}-{your-filename}`
+    : isNffadi && !isProposal
+      ? `${tenantSlug}-{uo-code}-${bucketDisplay}-{your-filename}`
+      : `${tenantSlug}-${bucketDisplay}-{your-filename}`
+
   return (
     <div className="page-container">
       <Navbar user={user} />
@@ -208,59 +249,28 @@ function BucketDetail() {
               </span>
             </div>
           </div>
-          <div style={{ display: 'flex', gap: '0.5rem' }}>
+          <div className="toolbar-cluster">
             {canLeave && (
-              <button className="button-delete-small" onClick={handleLeaveBucket} style={{ padding: '0.4rem 1rem' }}>
+              <button className="button-delete-small btn-compact" onClick={handleLeaveBucket}>
                 Leave Bucket
               </button>
             )}
             {isOwner && bucket.bucket_type === 'local' && (
-              <button className="button-secondary" onClick={() => setShowShareModal(true)}>
+              <button className="button-secondary btn-compact" onClick={() => setShowShareModal(true)}>
                 Share
               </button>
             )}
-            {nffadiLocalNeedsUo && (bucket?.permission === 'rw' || bucket?.permission === 'owner') && (
-              <div style={{
-                background: '#fef3c7', border: '1px solid #fcd34d',
-                borderRadius: '6px', padding: '0.5rem 0.75rem',
-                fontSize: '0.8rem', color: '#92400e',
-              }}>
-                Your account has not been fully registered yet. Contact your administrator to have your UO code assigned.
-              </div>
+            {bucket.files.length > 0 && (
+              <button
+                className="button-secondary btn-compact"
+                onClick={handleDownloadArchive}
+                disabled={downloadingArchive}
+              >
+                {downloadingArchive ? 'Preparing...' : 'Download all'}
+              </button>
             )}
             {canUpload && (
-              <div className="upload-section">
-                {/* Filename policy notice — shows the applicable naming rule for this bucket */}
-                {bucket && (() => {
-                  const tenantCode = (activeTenant?.code || '').toUpperCase()
-                  const isNffadi = tenantCode === 'NFFADI'
-                  const isProposal = bucket.bucket_type === 'proposal'
-                  const bucketDisplay = bucket.display_name || bucket.name
-                  const tenantSlug = tenantCode.toLowerCase()
-
-                  let ruleText = ''
-                  if (isNffadi && isProposal)
-                    ruleText = `${tenantSlug}-${bucketDisplay}-{uo-code}-{your-filename}`
-                  else if (isNffadi && !isProposal)
-                    ruleText = `${tenantSlug}-{uo-code}-${bucketDisplay}-{your-filename}`
-                  else if (isProposal)
-                    ruleText = `${tenantSlug}-${bucketDisplay}-{your-filename}`
-                  else
-                    ruleText = `${tenantSlug}-${bucketDisplay}-{your-filename}`
-
-                  return (
-                    <div style={{
-                      marginBottom: '0.5rem', padding: '0.5rem 0.75rem',
-                      background: '#f0f9ff', border: '1px solid #bae6fd',
-                      borderRadius: '6px', fontSize: '0.8rem', color: '#0369a1',
-                    }}>
-                      <strong>📌 Filename policy:</strong> your files will be renamed to{' '}
-                      <code style={{ fontFamily: 'monospace', background: '#e0f2fe', padding: '0 0.3em', borderRadius: '3px' }}>
-                        {ruleText}
-                      </code>
-                    </div>
-                  )
-                })()}
+              <>
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -269,17 +279,48 @@ function BucketDetail() {
                   style={{ display: 'none' }}
                   id="file-upload"
                 />
-                <label htmlFor="file-upload" className="button-primary" style={{ cursor: uploading ? 'default' : 'pointer' }}>
+                <label htmlFor="file-upload" className="button-primary btn-compact" style={{ cursor: uploading ? 'default' : 'pointer' }}>
                   {uploading
                     ? uploadProgress
                       ? `Uploading ${uploadProgress.current}/${uploadProgress.total}...`
                       : 'Uploading...'
                     : 'Upload Files'}
                 </label>
-              </div>
+              </>
             )}
           </div>
         </div>
+
+        {nffadiLocalNeedsUo && (bucket.permission === 'rw' || bucket.permission === 'owner') && (
+          <div style={{
+            background: '#fef3c7', border: '1px solid #fcd34d',
+            borderRadius: '6px', padding: '0.5rem 0.75rem',
+            fontSize: '0.8rem', color: '#92400e', marginBottom: '1rem',
+          }}>
+            Your account has not been fully registered yet. Contact your administrator to have your UO code assigned.
+          </div>
+        )}
+
+        {canUpload && (
+          <div className="naming-rules-panel" style={{ marginBottom: '1rem' }}>
+            <button
+              type="button"
+              className="naming-rules-toggle"
+              onClick={() => setShowNamingRules((prev) => !prev)}
+            >
+              <span>Filename policy</span>
+              <span>{showNamingRules ? 'Hide' : 'Show'}</span>
+            </button>
+            {showNamingRules && (
+              <div className="naming-rules-body">
+                Uploaded files are renamed to{' '}
+                <code style={{ fontFamily: 'monospace', background: '#e0f2fe', padding: '0 0.3em', borderRadius: '3px' }}>
+                  {namingRuleText}
+                </code>
+              </div>
+            )}
+          </div>
+        )}
 
         {accessList && accessList.access.length > 0 && (
           <div style={{
@@ -384,65 +425,98 @@ function BucketDetail() {
               <span style={{ color: '#9ca3af' }}>Total: <strong>{bucket.files.length}</strong> files · <strong>{formatSize(totalSize)}</strong></span>
             </div>
           )}
-          <div className="files-table-container">
-            <table className="files-table">
+          <div className="files-table-container files-table-container--detail">
+            <table className="files-table files-table--detail">
               <thead>
                 <tr>
                   <th>Name</th>
-                  <th>Size</th>
-                  <th>Uploaded By</th>
-                  <th>Last Modified</th>
-                  <th>Actions</th>
+                  <th className="files-col-size">Size</th>
+                  <th className="files-col-uploader">Uploaded By</th>
+                  <th className="files-col-modified">Last Modified</th>
+                  <th className="files-col-actions">Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {bucket.files.map((file) => (
+                {bucket.files.map((file) => {
+                  const isNexus = bucketAPI.isLikelyNexusFile(file.key)
+                  const isViewable = !isNexus && bucketAPI.isViewableFile(file.key)
+                  const menuOpen = openActionsKey === file.key
+                  return (
                   <tr key={file.key}>
-                    <td className="file-name">{file.key}</td>
-                    <td>{formatSize(file.size)}</td>
-                    <td style={{ color: '#888', fontSize: '0.85rem' }}>
+                    <td className="file-name" title={file.key}>{file.key}</td>
+                    <td className="files-col-size">{formatSize(file.size)}</td>
+                    <td className="files-col-uploader" style={{ color: '#888', fontSize: '0.85rem' }}>
                       {file.uploaded_by || '—'}
                     </td>
-                    <td>{formatDateTime(file.last_modified)}</td>
-                    <td>
-                      <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+                    <td className="files-col-modified">{formatDateTime(file.last_modified)}</td>
+                    <td className="files-col-actions">
+                      <div className="file-actions-menu">
                         <button
-                          className="button-primary"
-                          style={{ fontSize: '0.8rem', padding: '0.3rem 0.8rem' }}
-                          onClick={() => handleDownload(file.key)}
+                          type="button"
+                          className="file-actions-trigger"
+                          aria-expanded={menuOpen}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setOpenActionsKey(menuOpen ? null : file.key)
+                          }}
                         >
-                          Download
+                          Show
                         </button>
-                        {bucketAPI.isLikelyNexusFile(file.key) && (
-                          <Link
-                            to={`/buckets/${id}/nexus?file=${bucketAPI.encodeFileKey(file.key)}`}
-                            className="button-secondary"
-                            style={{ fontSize: '0.8rem', padding: '0.3rem 0.8rem' }}
+                        {menuOpen && (
+                          <div
+                            className="file-actions-dropdown"
+                            onClick={(e) => e.stopPropagation()}
                           >
-                            View
-                          </Link>
-                        )}
-                        {!bucketAPI.isLikelyNexusFile(file.key) && bucketAPI.isViewableFile(file.key) && (
-                          <button
-                            className="button-secondary"
-                            style={{ fontSize: '0.8rem', padding: '0.3rem 0.8rem' }}
-                            onClick={() => setViewingFile({ key: file.key, size: file.size })}
-                          >
-                            View
-                          </button>
-                        )}
-                        {canUpload && (
-                          <button
-                            className="button-delete-small"
-                            onClick={() => handleDeleteFile(file.key)}
-                          >
-                            Delete
-                          </button>
+                            <button
+                              type="button"
+                              className="file-actions-item"
+                              onClick={() => {
+                                setOpenActionsKey(null)
+                                handleDownload(file.key)
+                              }}
+                            >
+                              Download
+                            </button>
+                            {isNexus && (
+                              <Link
+                                to={`/buckets/${id}/nexus?file=${bucketAPI.encodeFileKey(file.key)}`}
+                                className="file-actions-item"
+                                onClick={() => setOpenActionsKey(null)}
+                              >
+                                View
+                              </Link>
+                            )}
+                            {isViewable && (
+                              <button
+                                type="button"
+                                className="file-actions-item"
+                                onClick={() => {
+                                  setOpenActionsKey(null)
+                                  setViewingFile({ key: file.key, size: file.size })
+                                }}
+                              >
+                                View
+                              </button>
+                            )}
+                            {canUpload && (
+                              <button
+                                type="button"
+                                className="file-actions-item file-actions-item-danger"
+                                onClick={() => {
+                                  setOpenActionsKey(null)
+                                  handleDeleteFile(file.key)
+                                }}
+                              >
+                                Delete
+                              </button>
+                            )}
+                          </div>
                         )}
                       </div>
                     </td>
                   </tr>
-                ))}
+                  )
+                })}
               </tbody>
             </table>
             <p className="file-count" style={{ padding: '0.5rem 1rem' }}>

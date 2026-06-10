@@ -12,7 +12,7 @@ import { useAutoError } from '../hooks/useAutoMessage'
 
 import { useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { authAPI, authStorage } from '../services/api'
+import { authAPI, authStorage, getApiError } from '../services/api'
 
 function AuthCallback() {
   const navigate = useNavigate()
@@ -40,8 +40,7 @@ function AuthCallback() {
         }
       } catch (err: unknown) {
         console.error('Token exchange failed:', err)
-        const message = err instanceof Error ? err.message : 'Unknown error'
-        setError(`Authentication failed: ${message}. Please try again.`)
+        setError(getApiError(err, 'Authentication failed. Please try again.'))
       }
     }
 

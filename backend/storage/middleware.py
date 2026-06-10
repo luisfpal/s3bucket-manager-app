@@ -3,6 +3,7 @@
 import logging
 from urllib.parse import urlencode
 
+from django.http import HttpResponseBadRequest
 from django.shortcuts import redirect
 from social_core.exceptions import (
     AuthCanceled,
@@ -23,6 +24,24 @@ class AuthMissingEmailClaim(AuthForbidden):
     targeted message directing the admin to set the user's email in Authentik.
     """
     pass
+
+
+class OAuthNextValidationMiddleware:
+    """Reject external OAuth next redirects before the Authentik handoff starts."""
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        if request.path.rstrip("/") == "/api/oauth/login/authentik":
+            next_url = request.GET.get("next", "")
+            if next_url and (
+                "://" in next_url
+                or not next_url.startswith("/")
+                or not next_url.startswith("/admin/")
+            ):
+                return HttpResponseBadRequest("Invalid OAuth redirect target")
+        return self.get_response(request)
 
 
 class OAuthExceptionRedirectMiddleware:
@@ -58,4 +77,11 @@ class OAuthExceptionRedirectMiddleware:
             error_code,
             str(exception),
         )
-        return redirect(f"/login?{urlencode({'auth_error': error_code})}")
+        session = getattr(request, "session", None)
+        next_url = session.get("next", "") if session is not None else ""
+        login_path = (
+            "/admin/login"
+            if isinstance(next_url, str) and next_url.startswith("/admin")
+            else "/login"
+        )
+        return redirect(f"{login_path}?{urlencode({'auth_error': error_code})}")

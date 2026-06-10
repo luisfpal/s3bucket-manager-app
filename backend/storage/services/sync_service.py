@@ -50,7 +50,13 @@ def refresh_local_cache(tenant, client=None):
         client = _get_client()
 
     structure = tenant.rgwsquared_structure
-    stats = {"users_synced": 0, "buckets_synced": 0, "permissions_synced": 0}
+    stats = {
+        "users_synced": 0,
+        "buckets_synced": 0,
+        "permissions_synced": 0,
+        "orphan_buckets_seen": 0,
+        "orphan_permissions_cleared": 0,
+    }
     synced_ceph_usernames = set()
     proposal_bucket_ids_by_name = {}
 
@@ -104,6 +110,11 @@ def refresh_local_cache(tenant, client=None):
 
         if bucket.bucket_type == Bucket.PROPOSAL:
             proposal_bucket_ids_by_name[bare_name] = bucket.id
+        elif isinstance(item, dict):
+            cleared = _cleanup_orphan_manual_bucket(bucket)
+            stats["orphan_buckets_seen"] += 1
+            if cleared:
+                stats["orphan_permissions_cleared"] += cleared
         stats["buckets_synced"] += 1
 
     ms_users = client.list_users(structure)
@@ -131,39 +142,7 @@ def refresh_local_cache(tenant, client=None):
         }
         role = "rw" if user_perms["rw"] else "ro"
 
-        # Resolve the Django user for this ceph_username.
-        # Priority: existing TenantMembership → real user by email or username → new placeholder.
-        membership = (
-            TenantMembership.objects.filter(tenant=tenant, ceph_username=username)
-            .select_related("user")
-            .first()
-        )
-        if membership:
-            user = membership.user
-        elif "@" in username:
-            # Placeholder from a previous sync stores the raw ceph_username verbatim in .username
-            # (sync uses create() directly, bypassing Django's sanitisation). Real OAuth users have
-            # .username sanitised (dots→underscores) but .email = ceph_username. Try both.
-            user = (
-                User.objects.filter(username=username).first()
-                or User.objects.filter(email=username).first()
-            )
-        else:
-            # Short-format: .username is stored unchanged, direct match works.
-            user = User.objects.filter(username=username).first()
-
-        if not user:
-            # Placeholder: lets admins inspect RGWSquared grants before the user's first login.
-            # associate_by_ceph_username in the OAuth pipeline will attach the real identity later.
-            user = User.objects.create(
-                username=username,
-                email=f"{username}@placeholder.local",
-                external_id=f"ms:{structure}:{username}",
-                is_active=True,
-                is_approved=True,
-            )
-            logger.info(f"Created placeholder user for {username} in {structure}")
-            stats["users_created"] = stats.get("users_created", 0) + 1
+        user = _resolve_user_for_identity(username, tenant, structure, stats)
 
         membership, _ = TenantMembership.objects.update_or_create(
             user=user,
@@ -238,6 +217,62 @@ def refresh_local_cache(tenant, client=None):
     return stats
 
 
+def _resolve_user_for_identity(identity, tenant, structure, stats):
+    """Map a RGWSquared username or email to a Django User."""
+    username = str(identity).strip()
+    if not username:
+        return None
+
+    membership = (
+        TenantMembership.objects.filter(tenant=tenant, ceph_username=username)
+        .select_related("user")
+        .first()
+    )
+    if membership:
+        return membership.user
+
+    if "@" in username:
+        user = (
+            User.objects.filter(email=username).first()
+            or User.objects.filter(username=username).first()
+        )
+    else:
+        user = User.objects.filter(username=username).first()
+
+    if not user:
+        email = username if "@" in username else f"{username}@placeholder.local"
+        user = User.objects.create(
+            username=username,
+            email=email,
+            external_id=f"ms:{structure}:{username}",
+            is_active=True,
+            is_approved=True,
+        )
+        logger.info("Created placeholder user for %s in %s", username, structure)
+        stats["users_created"] = stats.get("users_created", 0) + 1
+
+    return user
+
+
+def _cleanup_orphan_manual_bucket(bucket):
+    """Keep manual buckets visible to admins only; strip mistaken user permissions."""
+    has_local_owner = BucketPermission.objects.filter(
+        bucket=bucket,
+        permission="owner",
+        source="local",
+    ).exists()
+    if has_local_owner:
+        return 0
+    deleted, _ = BucketPermission.objects.filter(bucket=bucket).delete()
+    if deleted:
+        logger.info(
+            "Cleared %s Django permission(s) from orphan bucket %s",
+            deleted,
+            bucket.name,
+        )
+    return deleted
+
+
 def _bucket_ids_from_user_info(bucket_names, bucket_ids_by_name, tenant):
     """Resolve RGWSquared userInfo bucket references to proposal bucket IDs."""
     bucket_ids = set()
@@ -280,6 +315,7 @@ def _sync_user_permissions(user, tenant, rw_bucket_ids, ro_bucket_ids):
     BucketPermission.objects.filter(
         user=user,
         bucket__tenant=tenant,
+        bucket__bucket_type=Bucket.PROPOSAL,
         source="rgwsquared",
     ).exclude(bucket_id__in=synced_bucket_ids).delete()
     return len(synced_bucket_ids)

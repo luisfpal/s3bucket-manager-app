@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bucket-explorer-backend"
+version = "1.0.0"
+description = "Django REST API for Bucket Explorer"
+requires-python = ">=3.11"
+dependencies = [
+    "Django==4.2.7",
+    "gunicorn==21.2.0",
+    "djangorestframework==3.14.0",
+    "djangorestframework-simplejwt==5.3.1",
+    "social-auth-app-django==5.4.0",
+    "social-auth-core==4.5.1",
+    "psycopg2-binary==2.9.9",
+    "boto3==1.29.7",
+    "whitenoise==6.8.2",
+    "requests==2.32.5",
+    "cryptography==45.0.4",
+    "drf-spectacular==0.27.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-django>=4.5",
+    "pytest-cov>=4.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["storage*"]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "settings"
+python_files = ["tests.py", "test_*.py"]
+
+[tool.coverage.run]
+source = ["storage"]
+omit = ["*/migrations/*"]
+
+[tool.coverage.report]
+show_missing = true

@@ -1,7 +1,9 @@
 """Bucket CRUD + file operations — tenant-scoped, permission-aware."""
 
+import io
 import logging
 import re
+import zipfile
 
 from django.http import HttpResponse
 from django.db import transaction
@@ -34,7 +36,11 @@ from storage.services.s3_ops import (
     get_mgmt_s3_client,
     get_bucket_stats_for_tenant,
 )
-from storage.services.rgw_squared import RGWSquaredClient, RGWSquaredError
+from storage.services.rgw_squared import (
+    RGWSquaredClient,
+    RGWSquaredError,
+    delete_bucket_via_rgw,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -505,7 +511,9 @@ class BucketViewSet(viewsets.ViewSet):
         try:
             client = _get_rgw_client()
             ensure_structure_initialized(bucket.tenant, client=client)
-            client.delete_bucket(_structure_name(bucket.tenant), bucket.name)
+            delete_bucket_via_rgw(
+                client, _structure_name(bucket.tenant), bucket.name
+            )
         except RGWSquaredError as e:
             return _error_response(e, status.HTTP_400_BAD_REQUEST)
         except RuntimeError as e:
@@ -948,6 +956,62 @@ class BucketViewSet(viewsets.ViewSet):
                 status=status.HTTP_404_NOT_FOUND,
             )
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=["get"], url_path="download-archive")
+    def download_archive(self, request, pk=None):
+        """Download all bucket files as a zip archive."""
+        try:
+            bucket = Bucket.objects.select_related("tenant").get(id=pk)
+        except Bucket.DoesNotExist:
+            return Response(
+                {"error": "Bucket not found"}, status=status.HTTP_404_NOT_FOUND
+            )
+
+        if not perms.can_download_file(request.user, bucket):
+            return Response(
+                {"error": "Access denied"}, status=status.HTTP_403_FORBIDDEN
+            )
+
+        blocked = _block_if_storage_uninitialized(bucket.tenant)
+        if blocked:
+            return blocked
+
+        try:
+            s3 = get_mgmt_s3_client(bucket.tenant)
+            files = list_objects(s3, bucket.name)
+        except Exception as e:
+            logger.error(f"Archive listing failed for {bucket.name}: {e}")
+            return Response(
+                {"error": f"Archive listing failed: {e}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        if not files:
+            return Response(
+                {"error": "Bucket is empty"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+            for entry in files:
+                key = entry["key"]
+                try:
+                    body, _ = download_object(s3, bucket.name, key)
+                except Exception as e:
+                    logger.error(f"Archive download failed for {bucket.name}/{key}: {e}")
+                    return Response(
+                        {"error": f"Archive download failed for {key}: {e}"},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    )
+                zf.writestr(key, body)
+
+        archive.seek(0)
+        safe_name = (bucket.display_name or bucket.name).replace('"', "_")
+        response = HttpResponse(archive.getvalue(), content_type="application/zip")
+        response["Content-Disposition"] = f'attachment; filename="{safe_name}.zip"'
+        response["Content-Length"] = len(response.content)
+        return response
 
     @action(detail=True, methods=["get"], url_path="nexus-detect/(?P<file_key>.+)")
     def nexus_detect(self, request, pk=None, file_key=None):

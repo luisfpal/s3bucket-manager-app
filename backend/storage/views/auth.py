@@ -79,13 +79,14 @@ def exchange_token(request):
             status=status.HTTP_401_UNAUTHORIZED,
         )
 
-    if not request.user.can_access_system:
+    user = request.user
+    user.refresh_from_db()
+
+    if not user.can_access_system:
         return Response(
             {"error": "Account pending approval."},
             status=status.HTTP_403_FORBIDDEN,
         )
-
-    user = request.user
     memberships = TenantMembership.objects.filter(
         user=user, is_active=True
     ).select_related("tenant", "tenant__document")
@@ -108,6 +109,16 @@ def exchange_token(request):
     ]
 
     if not tenants:
+        if user.is_staff:
+            return Response(
+                {
+                    "error": (
+                        "This account has admin access only. "
+                        "Use /admin/login to access the admin panel."
+                    ),
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
         return Response(
             {"error": "No fully activated tenant is available for this account."},
             status=status.HTTP_403_FORBIDDEN,
@@ -254,8 +265,6 @@ def current_user(request):
         for m in memberships
         if m.tenant_id in active_tenant_ids
     ]
-    user_data["is_admin"] = user.is_staff
-
     return Response(user_data)
 
 

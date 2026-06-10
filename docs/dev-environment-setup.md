@@ -443,6 +443,16 @@ The scripts wait for pods to become healthy before continuing. After a successfu
 # Open http://localhost:3000
 ```
 
+### Access from your laptop
+
+The development deployment host SSH alias is **`orfeo-vm`**. Port-forwards run on that host (frontend `:3000`, Authentik `:9000`). From your laptop, forward those ports through SSH:
+
+```bash
+ssh -L 3000:localhost:3000 -L 9000:localhost:9000 orfeo-vm
+```
+
+Then open `http://localhost:3000`. `./app.sh access` on the deployment host prints this command when setup completes.
+
 ---
 
 ## Step 10: Optional — Install the GitHub Actions Runner (ARC)

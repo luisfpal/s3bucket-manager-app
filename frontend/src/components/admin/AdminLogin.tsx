@@ -1,64 +1,63 @@
 import { useAutoError } from '../../hooks/useAutoMessage'
-import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { adminAPI, authStorage, getApiError } from '../../services/api'
+import { useEffect } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
+import { adminAPI } from '../../services/api'
 import BrandMark from '../BrandMark'
 
-function AdminLogin() {
-  const [username, setUsername] = useState('')
-  const [password, setPassword] = useState('')
-  const [error, setError] = useAutoError()
-  const [loading, setLoading] = useState(false)
-  const navigate = useNavigate()
+const authErrorMessages: Record<string, string> = {
+  oauth_state_missing: 'Your login session expired or the callback was opened without the original browser session. Start the login again from here.',
+  oauth_state_invalid: 'The login state did not match this browser session. Start the login again from here.',
+  oauth_forbidden: 'Your Authentik account is not authorized for admin panel access. Contact a platform administrator.',
+  admin_oauth_forbidden: 'Your Authentik account is not a member of the admin group required for this panel.',
+  missing_email: 'Your Authentik account does not have an email address configured. Please contact the administrator to set your email in the Authentik user profile.',
+  oauth_cancelled: 'The Authentik login was cancelled. Start the login again when ready.',
+  oauth_failed: 'Authentik login failed. Start the login again from here.',
+}
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!username.trim() || !password) return
-    try {
-      setLoading(true)
-      setError(null)
-      const data = await adminAPI.login(username.trim(), password)
-      authStorage.setAdminTokens(data.access, data.refresh, data.display_name || data.username)
-      navigate('/admin', { replace: true })
-    } catch (err: unknown) {
-      setError(getApiError(err, 'Login failed'))
-    } finally {
-      setLoading(false)
+function AdminLogin() {
+  const navigate = useNavigate()
+  const location = useLocation()
+  const [error, setError] = useAutoError()
+  const authError = new URLSearchParams(location.search).get('auth_error') || ''
+
+  useEffect(() => {
+    if (authError) {
+      adminAPI.logout()
+      return
     }
+    if (adminAPI.isAuthenticated()) {
+      navigate('/admin', { replace: true })
+    }
+  }, [authError, navigate])
+
+  if (!authError && adminAPI.isAuthenticated()) {
+    return null
   }
 
   return (
     <div className="page-container">
       <div className="auth-container">
         <div className="auth-card">
-          <h1 className="auth-title">Admin Login</h1>
+          <h1 className="auth-title">Admin Panel</h1>
           <p style={{ color: '#666', fontSize: '0.875rem', marginBottom: '0.5rem', textAlign: 'center' }}>Buckets Explorer</p>
           <BrandMark />
-          {error && <div className="error-message">{error}</div>}
-          <form className="auth-form" onSubmit={handleSubmit}>
-            <div className="form-group">
-              <label>Username</label>
-              <input
-                type="text"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                autoFocus
-                autoComplete="username"
-              />
+
+          {(authError || error) && (
+            <div className="error-message" style={{ marginBottom: '1rem', textAlign: 'left' }}>
+              {authError ? (authErrorMessages[authError] || authErrorMessages.oauth_failed) : error}
             </div>
-            <div className="form-group">
-              <label>Password</label>
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                autoComplete="current-password"
-              />
-            </div>
-            <button type="submit" className="auth-button" disabled={loading || !username.trim() || !password}>
-              {loading ? 'Signing in...' : 'Sign In'}
-            </button>
-          </form>
+          )}
+
+          <button
+            className="auth-button"
+            style={{ width: '100%', fontSize: '1.1rem', padding: '1rem' }}
+            onClick={() => {
+              setError(null)
+              adminAPI.startLogin()
+            }}
+          >
+            Login with Authentik
+          </button>
         </div>
       </div>
     </div>

@@ -7,7 +7,8 @@ Permission model:
 - Bucket owner (BucketPermission.permission='owner'): full control
 - RW user: can view, upload, delete own files
 - RO user: can view, download only
-- Admin (is_staff): full control over tenant resources
+
+Admin panel operators manage storage via /api/admin/* only — no is_staff bypass here.
 
 File deletion rule for shared buckets:
 - Owner can delete ANY file
@@ -23,8 +24,6 @@ logger = logging.getLogger(__name__)
 
 def get_user_permission(user, bucket):
     """Get user's permission level on a bucket. Returns 'owner'/'rw'/'ro'/None."""
-    if user.is_staff:
-        return "owner"
     try:
         perm = BucketPermission.objects.get(bucket=bucket, user=user)
         return perm.permission

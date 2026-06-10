@@ -4,16 +4,21 @@ from io import StringIO
 from unittest.mock import patch
 
 import requests
+from django.contrib.sessions.backends.db import SessionStore
 from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
-from django.core.management.base import CommandError
 from django.test import TestCase, override_settings
 from django.urls import Resolver404, resolve
 from rest_framework.test import APIRequestFactory, force_authenticate
 
-from storage.middleware import OAuthExceptionRedirectMiddleware
-from storage.pipeline import extract_tenant_info
+from social_django.models import UserSocialAuth
+
+from storage.middleware import OAuthExceptionRedirectMiddleware, OAuthNextValidationMiddleware
+from storage.pipeline import extract_tenant_info, persist_authentik_groups
+from storage.views.auth import exchange_token
+from storage.services import permissions as bucket_permissions
+from storage.tokens import AdminRefreshToken
 from storage.models import (
     Bucket,
     BucketPermission,
@@ -28,9 +33,11 @@ from storage.services.rgw_squared import RGWSquaredClient, RGWSquaredError
 from storage.services.s3_ops import fetch_mgmt_keys
 from storage.services.sync_service import refresh_local_cache
 from storage.views.admin import (
-    AdminLoginThrottle,
+    AdminExchangeThrottle,
+    admin_bucket_detail,
+    admin_buckets,
+    admin_exchange_token,
     admin_group_mappings,
-    admin_login,
     admin_membership_files,
     admin_sync_refresh,
     admin_sync_upload_csv,
@@ -38,6 +45,28 @@ from storage.views.admin import (
     admin_users,
 )
 from storage.views.buckets import BucketViewSet
+
+
+ADMIN_GROUP = "buckets-explorer-admin"
+
+
+def force_admin(request, user):
+    refresh = AdminRefreshToken.for_admin_user(user)
+    force_authenticate(request, user=user, token=refresh.access_token)
+
+
+def attach_session(request):
+    request.session = SessionStore()
+    request.session.create()
+
+
+def link_authentik_user(user, groups=None, uid=None):
+    UserSocialAuth.objects.create(
+        user=user,
+        provider="authentik",
+        uid=uid or user.external_id,
+        extra_data={"groups": groups or [ADMIN_GROUP]},
+    )
 
 
 class FakeHTTPResponse:
@@ -101,85 +130,305 @@ class RGWSquaredClientTests(TestCase):
         self.assertIn("bucketCreate", str(ctx.exception))
 
 
-class EnsureSuperuserCommandTests(TestCase):
-    def call_command(self, env, debug=True):
+class PurgeLocalStaffUsersCommandTests(TestCase):
+    def test_deletes_local_staff_users(self):
+        User.objects.create_user(
+            username="legacy-admin",
+            email="legacy@example.com",
+            external_id="legacy-local",
+            password="legacy-password",
+            idp_source="local",
+            is_staff=True,
+            is_superuser=True,
+            is_approved=True,
+        )
+
         out = StringIO()
-        with override_settings(DEBUG=debug):
-            with patch.dict(os.environ, env, clear=False):
-                call_command("ensure_superuser", stdout=out)
-        return out.getvalue()
+        call_command("purge_local_staff_users", stdout=out)
 
-    def test_creates_local_admin_from_env(self):
-        self.call_command(
-            {
-                "DJANGO_SUPERUSER_USERNAME": "admin",
-                "DJANGO_SUPERUSER_PASSWORD": "secret-password",
-                "DJANGO_SUPERUSER_EMAIL": "admin@example.com",
-            }
-        )
+        self.assertIn("Deleted 1", out.getvalue())
+        self.assertFalse(User.objects.filter(username="legacy-admin").exists())
 
-        user = User.objects.get(username="admin")
-        self.assertTrue(user.is_staff)
-        self.assertTrue(user.is_superuser)
-        self.assertTrue(user.is_active)
-        self.assertTrue(user.is_approved)
-        self.assertEqual(user.email, "admin@example.com")
-        self.assertEqual(user.external_id, "admin-local")
-        self.assertEqual(user.idp_source, "local")
-        self.assertTrue(user.check_password("secret-password"))
 
-    def test_repairs_existing_admin_and_rotates_password(self):
-        user = User.objects.create_user(
+@override_settings(AUTHENTIK_ADMIN_GROUP=ADMIN_GROUP)
+class AdminAuthSecurityTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.factory = APIRequestFactory()
+        self.admin = User.objects.create_user(
             username="admin",
-            email="old@example.com",
-            external_id="admin-local",
-            password="old-password",
+            email="admin@example.com",
+            external_id="sub-admin",
+            password="unused",
+            is_staff=True,
+            is_approved=True,
+            idp_source="authentik",
+        )
+        link_authentik_user(self.admin)
+
+    def test_admin_exchange_returns_admin_jwt(self):
+        request = self.factory.get("/api/admin/auth/token/")
+        attach_session(request)
+        force_authenticate(request, user=self.admin)
+        response = admin_exchange_token(request)
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertIn("access", response.data)
+        self.assertIn("refresh", response.data)
+
+    def test_admin_exchange_succeeds_without_extra_data_groups(self):
+        UserSocialAuth.objects.filter(user=self.admin).update(extra_data={})
+        request = self.factory.get("/api/admin/auth/token/")
+        attach_session(request)
+        force_authenticate(request, user=self.admin)
+        response = admin_exchange_token(request)
+        self.assertEqual(response.status_code, 200, response.data)
+
+    def test_admin_exchange_rejects_non_staff(self):
+        user = User.objects.create_user(
+            username="regular",
+            email="regular@example.com",
+            external_id="sub-regular",
+            password="unused",
             is_staff=False,
-            is_superuser=False,
-            is_active=False,
-            is_approved=False,
+            is_approved=True,
+            idp_source="authentik",
         )
+        link_authentik_user(user, groups=["tenant-users"])
 
-        self.call_command(
-            {
-                "DJANGO_SUPERUSER_USERNAME": "admin",
-                "DJANGO_SUPERUSER_PASSWORD": "new-password",
-                "DJANGO_SUPERUSER_EMAIL": "admin@example.com",
-            }
+        request = self.factory.get("/api/admin/auth/token/")
+        force_authenticate(request, user=user)
+        response = admin_exchange_token(request)
+
+        self.assertEqual(response.status_code, 403, response.data)
+
+    def test_admin_exchange_requires_session(self):
+        request = self.factory.get("/api/admin/auth/token/")
+        response = admin_exchange_token(request)
+        self.assertEqual(response.status_code, 401, response.data)
+
+    def test_admin_exchange_is_throttled(self):
+        with patch.object(
+            AdminExchangeThrottle, "THROTTLE_RATES", {"admin_exchange": "2/min"}
+        ):
+            for _ in range(2):
+                request = self.factory.get(
+                    "/api/admin/auth/token/",
+                    REMOTE_ADDR="203.0.113.11",
+                )
+                attach_session(request)
+                force_authenticate(request, user=self.admin)
+                response = admin_exchange_token(request)
+                self.assertEqual(response.status_code, 200, response.data)
+
+            request = self.factory.get(
+                "/api/admin/auth/token/",
+                REMOTE_ADDR="203.0.113.11",
+            )
+            attach_session(request)
+            force_authenticate(request, user=self.admin)
+            response = admin_exchange_token(request)
+            self.assertEqual(response.status_code, 429, response.data)
+
+    def test_regular_user_jwt_cannot_access_admin_api(self):
+        user = User.objects.create_user(
+            username="tenant-user",
+            email="tenant@example.com",
+            external_id="sub-tenant",
+            password="unused",
+            is_staff=True,
+            is_approved=True,
+            idp_source="authentik",
         )
+        from rest_framework_simplejwt.tokens import RefreshToken
 
+        refresh = RefreshToken.for_user(user)
+        request = self.factory.get("/api/admin/buckets/")
+        force_authenticate(request, user=user, token=refresh.access_token)
+        response = admin_buckets(request)
+        self.assertEqual(response.status_code, 403)
+
+    def test_admin_jwt_can_access_admin_api(self):
+        request = self.factory.get("/api/admin/buckets/")
+        force_admin(request, self.admin)
+        with patch("storage.views.admin.get_bucket_stats_for_tenant", return_value={}):
+            response = admin_buckets(request)
+        self.assertEqual(response.status_code, 200)
+
+    def test_staff_user_has_no_bucket_owner_bypass(self):
+        user = User.objects.create_user(
+            username="staff-no-bypass",
+            email="staff@example.com",
+            external_id="sub-staff",
+            password="unused",
+            is_staff=True,
+            is_approved=True,
+        )
+        tenant = Tenant.objects.create(code="LAB", name="Lab", rgwsquared_structure="LAB")
+        bucket = Bucket.objects.create(
+            tenant=tenant,
+            name="demo",
+            bucket_type=Bucket.LOCAL,
+        )
+        self.assertIsNone(bucket_permissions.get_user_permission(user, bucket))
+
+    def test_pipeline_syncs_and_revokes_staff_from_admin_group(self):
+        user = User.objects.create_user(
+            username="oauth-admin",
+            email="oauth-admin@example.com",
+            external_id="sub-oauth-admin",
+            password="unused",
+            is_staff=False,
+            is_approved=True,
+            idp_source="authentik",
+        )
+        backend = type("Backend", (), {"name": "authentik"})()
+
+        extract_tenant_info(
+            backend,
+            {},
+            {"groups": [ADMIN_GROUP], "preferred_username": "oauth-admin"},
+            user=user,
+        )
         user.refresh_from_db()
         self.assertTrue(user.is_staff)
-        self.assertTrue(user.is_superuser)
-        self.assertTrue(user.is_active)
-        self.assertTrue(user.is_approved)
-        self.assertEqual(user.email, "admin@example.com")
-        self.assertEqual(user.idp_source, "local")
-        self.assertTrue(user.check_password("new-password"))
-        self.assertFalse(user.check_password("old-password"))
 
-    def test_skips_when_completely_unconfigured(self):
-        output = self.call_command(
-            {
-                "DJANGO_SUPERUSER_USERNAME": "",
-                "DJANGO_SUPERUSER_PASSWORD": "",
-                "DJANGO_SUPERUSER_EMAIL": "",
-            }
+        tenant = Tenant.objects.create(code="LAB2", name="Lab 2", rgwsquared_structure="LAB2")
+        GroupTenantMapping.objects.create(
+            tenant=tenant,
+            authentik_group="tenant-users",
+            role="rw",
+        )
+        with patch("storage.pipeline._sync_rgwsquared_user_access", return_value=True):
+            extract_tenant_info(
+                backend,
+                {},
+                {"groups": ["tenant-users"], "preferred_username": "oauth-admin"},
+                user=user,
+            )
+        user.refresh_from_db()
+        self.assertFalse(user.is_staff)
+
+    def test_oauth_next_validation_rejects_external_redirect(self):
+        middleware = OAuthNextValidationMiddleware(lambda req: None)
+        request = self.factory.get(
+            "/api/oauth/login/authentik/?next=https://evil.example/admin"
+        )
+        response = middleware(request)
+        self.assertEqual(response.status_code, 400)
+
+    def test_persist_authentik_groups_writes_extra_data(self):
+        backend = type("Backend", (), {"name": "authentik"})()
+        persist_authentik_groups(
+            backend,
+            {},
+            {"groups": [ADMIN_GROUP, "other-group"]},
+            user=self.admin,
+        )
+        social = UserSocialAuth.objects.get(user=self.admin, provider="authentik")
+        self.assertEqual(social.extra_data.get("groups"), [ADMIN_GROUP, "other-group"])
+
+    def test_admin_only_user_gets_hint_on_user_exchange(self):
+        request = self.factory.get("/api/auth/token/")
+        attach_session(request)
+        force_authenticate(request, user=self.admin)
+        response = exchange_token(request)
+        self.assertEqual(response.status_code, 403, response.data)
+        self.assertIn("/admin/login", response.data["error"])
+
+
+@override_settings(
+    RGWSQUARED_URL="http://rgw",
+    RGWSQUARED_USERNAME="admin",
+    RGWSQUARED_PASSWORD="secret",
+)
+class AdminBucketDeleteTests(TestCase):
+    def setUp(self):
+        self.factory = APIRequestFactory()
+        self.admin = User.objects.create_user(
+            username="admin-delete",
+            email="admin-delete@example.com",
+            external_id="sub-admin-delete",
+            password="unused",
+            is_staff=True,
+            is_approved=True,
+            idp_source="authentik",
+        )
+        link_authentik_user(self.admin)
+        self.tenant = Tenant.objects.create(
+            code="GENOME",
+            name="Genome",
+            rgwsquared_structure="GENOME",
+        )
+        self.bucket = Bucket.objects.create(
+            name="orphan-bucket-01",
+            tenant=self.tenant,
+            bucket_type=Bucket.LOCAL,
+            is_deletable=True,
         )
 
-        self.assertIn("not configured", output)
-        self.assertFalse(User.objects.filter(username="admin").exists())
+    def admin_delete(self, bucket_id, force=False):
+        path = f"/api/admin/buckets/{bucket_id}/"
+        if force:
+            path += "?force=true"
+        request = self.factory.delete(path)
+        force_admin(request, self.admin)
+        return admin_bucket_detail(request, bucket_id=bucket_id)
 
-    def test_non_debug_partial_configuration_fails(self):
-        with self.assertRaises(CommandError):
-            self.call_command(
-                {
-                    "DJANGO_SUPERUSER_USERNAME": "admin",
-                    "DJANGO_SUPERUSER_PASSWORD": "",
-                    "DJANGO_SUPERUSER_EMAIL": "admin@example.com",
-                },
-                debug=False,
-            )
+    def test_admin_delete_success_removes_metadata(self):
+        rgw = RecordingRGWClient(users=[])
+        with patch("storage.views.admin._get_sync_client", return_value=rgw):
+            response = self.admin_delete(self.bucket.id)
+
+        self.assertEqual(response.status_code, 204, response.data)
+        self.assertEqual(
+            rgw.calls,
+            [("structureInfo", "GENOME"), ("bucketDelete", "GENOME", "orphan-bucket-01")],
+        )
+        self.assertFalse(Bucket.objects.filter(id=self.bucket.id).exists())
+
+    def test_admin_delete_connectivity_error_keeps_metadata(self):
+        class ConnectivityRGWClient(RecordingRGWClient):
+            def delete_bucket(self, structure, bucket_name):
+                super().delete_bucket(structure, bucket_name)
+                raise RGWSquaredError(
+                    "Inaccessible host: `10.128.2.28' at port `7480'"
+                )
+
+        rgw = ConnectivityRGWClient(users=[])
+        with patch("storage.views.admin._get_sync_client", return_value=rgw):
+            response = self.admin_delete(self.bucket.id)
+
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertTrue(Bucket.objects.filter(id=self.bucket.id).exists())
+
+    def test_admin_delete_not_found_still_removes_metadata(self):
+        class MissingRGWClient(RecordingRGWClient):
+            def delete_bucket(self, structure, bucket_name):
+                super().delete_bucket(structure, bucket_name)
+                raise RGWSquaredError("Bucket not found")
+
+        rgw = MissingRGWClient(users=[])
+        with patch("storage.views.admin._get_sync_client", return_value=rgw):
+            response = self.admin_delete(self.bucket.id)
+
+        self.assertEqual(response.status_code, 204, response.data)
+        self.assertFalse(Bucket.objects.filter(id=self.bucket.id).exists())
+
+    def test_admin_delete_ignores_force_query_param(self):
+        class ConnectivityRGWClient(RecordingRGWClient):
+            def delete_bucket(self, structure, bucket_name):
+                super().delete_bucket(structure, bucket_name)
+                raise RGWSquaredError(
+                    "Inaccessible host: `10.128.2.28' at port `7480'"
+                )
+
+        rgw = ConnectivityRGWClient(users=[])
+        with patch("storage.views.admin._get_sync_client", return_value=rgw):
+            response = self.admin_delete(self.bucket.id, force=True)
+
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertTrue(Bucket.objects.filter(id=self.bucket.id).exists())
 
 
 class AdminMembershipUsersTests(TestCase):
@@ -507,70 +756,6 @@ class TenantActivationSummaryTests(TestCase):
         self.assertEqual(row["missing_uo_count"], 0)
 
 
-class AdminLoginTests(TestCase):
-    def setUp(self):
-        cache.clear()
-        self.factory = APIRequestFactory()
-        self.admin = User.objects.create_user(
-            username="admin",
-            email="admin@example.com",
-            external_id="admin-local",
-            password="admin-password",
-            is_staff=True,
-            is_superuser=True,
-            is_approved=True,
-        )
-
-    def test_admin_login_returns_jwt_for_staff_user(self):
-        request = self.factory.post(
-            "/api/admin/login/",
-            {"username": "admin", "password": "admin-password"},
-            format="json",
-        )
-        response = admin_login(request)
-
-        self.assertEqual(response.status_code, 200, response.data)
-        self.assertIn("access", response.data)
-        self.assertIn("refresh", response.data)
-        self.assertEqual(response.data["username"], "admin")
-
-    def test_admin_login_rejects_bad_password(self):
-        request = self.factory.post(
-            "/api/admin/login/",
-            {"username": "admin", "password": "wrong"},
-            format="json",
-        )
-        response = admin_login(request)
-
-        self.assertEqual(response.status_code, 401, response.data)
-
-    def test_admin_login_is_throttled(self):
-        with patch.object(
-            AdminLoginThrottle, "THROTTLE_RATES", {"admin_login": "2/min"}
-        ):
-            for _ in range(2):
-                request = self.factory.post(
-                    "/api/admin/login/",
-                    {"username": "admin", "password": "wrong"},
-                    format="json",
-                    REMOTE_ADDR="203.0.113.10",
-                )
-                response = admin_login(request)
-                self.assertEqual(response.status_code, 401, response.data)
-
-            request = self.factory.post(
-                "/api/admin/login/",
-                {"username": "admin", "password": "wrong"},
-                format="json",
-                REMOTE_ADDR="203.0.113.10",
-            )
-            response = admin_login(request)
-
-            self.assertEqual(response.status_code, 429, response.data)
-
-
-
-
 class OAuthExceptionMiddlewareTests(TestCase):
     def test_auth_state_missing_redirects_to_login_retry(self):
         from social_core.exceptions import AuthStateMissing
@@ -581,6 +766,18 @@ class OAuthExceptionMiddlewareTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response["Location"], "/login?auth_error=oauth_state_missing")
+
+    def test_auth_state_missing_redirects_to_admin_login_when_next_is_admin(self):
+        from social_core.exceptions import AuthStateMissing
+
+        request = APIRequestFactory().get("/api/oauth/complete/authentik/")
+        attach_session(request)
+        request.session["next"] = "/admin/auth/callback"
+        middleware = OAuthExceptionRedirectMiddleware(lambda req: None)
+        response = middleware.process_exception(request, AuthStateMissing(None))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response["Location"], "/admin/login?auth_error=oauth_state_missing")
 
 
 class AdminGroupMappingPolicyTests(TestCase):
@@ -1043,6 +1240,46 @@ class BucketLifecycleTests(TestCase):
         )
         self.assertFalse(Bucket.objects.filter(id=bucket.id).exists())
 
+    def test_delete_connectivity_error_keeps_metadata(self):
+        bucket = self.local_bucket()
+
+        class ConnectivityRGWClient(RecordingRGWClient):
+            def delete_bucket(self, structure, bucket_name):
+                super().delete_bucket(structure, bucket_name)
+                raise RGWSquaredError(
+                    "Inaccessible host: `10.128.2.28' at port `7480'"
+                )
+
+        rgw = ConnectivityRGWClient(users=["owner"])
+        request = self.authenticated_request(
+            "delete", f"/api/buckets/{bucket.id}/", self.owner
+        )
+
+        with patch("storage.views.buckets._get_rgw_client", return_value=rgw):
+            response = self.view_delete(request, pk=bucket.id)
+
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertTrue(Bucket.objects.filter(id=bucket.id).exists())
+
+    def test_delete_not_found_still_removes_metadata(self):
+        bucket = self.local_bucket()
+
+        class MissingRGWClient(RecordingRGWClient):
+            def delete_bucket(self, structure, bucket_name):
+                super().delete_bucket(structure, bucket_name)
+                raise RGWSquaredError("Bucket not found")
+
+        rgw = MissingRGWClient(users=["owner"])
+        request = self.authenticated_request(
+            "delete", f"/api/buckets/{bucket.id}/", self.owner
+        )
+
+        with patch("storage.views.buckets._get_rgw_client", return_value=rgw):
+            response = self.view_delete(request, pk=bucket.id)
+
+        self.assertEqual(response.status_code, 204, response.data)
+        self.assertFalse(Bucket.objects.filter(id=bucket.id).exists())
+
     def test_share_updates_rgwsquared_before_persisting_permission(self):
         bucket = self.local_bucket()
         rgw = RecordingRGWClient(users=["owner", "target"])
@@ -1141,6 +1378,145 @@ class SyncServiceTests(TestCase):
             ).exists()
         )
 
+    def test_refresh_creates_orphan_manual_bucket_without_permissions(self):
+        tenant, _ = Tenant.objects.update_or_create(
+            code="GENOME",
+            defaults={"name": "Genome", "rgwsquared_structure": "GENOME"},
+        )
+
+        class SyncClient:
+            def get_structure_info(self, structure):
+                return {"initialized": True}
+
+            def list_buckets(self, structure):
+                return [
+                    {
+                        "name": "massimo-cuscuna-bucket01",
+                        "auto": False,
+                        "manual": True,
+                        "RWPermissions": ["massimo.cuscuna@nanotec.cnr.it"],
+                        "ROPermissions": [],
+                    }
+                ]
+
+            def list_users(self, structure):
+                return []
+
+        stats = refresh_local_cache(tenant, client=SyncClient())
+
+        bucket = Bucket.objects.get(name="massimo-cuscuna-bucket01", tenant=tenant)
+        self.assertEqual(bucket.bucket_type, Bucket.LOCAL)
+        self.assertEqual(stats["orphan_buckets_seen"], 1)
+        self.assertEqual(BucketPermission.objects.filter(bucket=bucket).count(), 0)
+
+    def test_refresh_preserves_local_owner_on_manual_bucket(self):
+        tenant, _ = Tenant.objects.update_or_create(
+            code="NFFADI",
+            defaults={"name": "NFFA-DI", "rgwsquared_structure": "NFFADI"},
+        )
+        owner = User.objects.create_user(
+            username="alice",
+            email="alice@example.com",
+            external_id="sub-alice",
+        )
+        bucket = Bucket.objects.create(
+            tenant=tenant,
+            name="alice-bucket01",
+            display_name="bucket01",
+            bucket_type=Bucket.LOCAL,
+            is_deletable=True,
+            owner=owner,
+        )
+        BucketPermission.objects.create(
+            bucket=bucket,
+            user=owner,
+            permission="owner",
+            source="local",
+        )
+
+        class SyncClient:
+            def get_structure_info(self, structure):
+                return {"initialized": True}
+
+            def list_buckets(self, structure):
+                return [
+                    {
+                        "name": "alice-bucket01",
+                        "auto": False,
+                        "manual": True,
+                        "RWPermissions": ["alice"],
+                        "ROPermissions": [],
+                    }
+                ]
+
+            def list_users(self, structure):
+                return []
+
+        refresh_local_cache(tenant, client=SyncClient())
+
+        bucket.refresh_from_db()
+        self.assertEqual(bucket.display_name, "bucket01")
+        owner_perm = BucketPermission.objects.get(bucket=bucket, user=owner)
+        self.assertEqual(owner_perm.permission, "owner")
+        self.assertEqual(owner_perm.source, "local")
+
+    def test_refresh_clears_stale_orphan_permissions_after_user_info_sync(self):
+        tenant, _ = Tenant.objects.update_or_create(
+            code="GENOME",
+            defaults={"name": "Genome", "rgwsquared_structure": "GENOME"},
+        )
+        owner = User.objects.create_user(
+            username="massimo.cuscuna@nanotec.cnr.it",
+            email="massimo.cuscuna@nanotec.cnr.it",
+            external_id="sub-massimo",
+        )
+        bucket = Bucket.objects.create(
+            tenant=tenant,
+            name="massimo-cuscuna-bucket01",
+            display_name="massimo-cuscuna-bucket01",
+            bucket_type=Bucket.LOCAL,
+            is_deletable=True,
+        )
+        BucketPermission.objects.create(
+            bucket=bucket,
+            user=owner,
+            permission="owner",
+            source="rgwsquared",
+        )
+        TenantMembership.objects.create(
+            user=owner,
+            tenant=tenant,
+            ceph_username="massimo.cuscuna@nanotec.cnr.it",
+            role="ro",
+        )
+
+        class SyncClient:
+            def get_structure_info(self, structure):
+                return {"initialized": True}
+
+            def list_buckets(self, structure):
+                return [
+                    {
+                        "name": "massimo-cuscuna-bucket01",
+                        "auto": False,
+                        "manual": True,
+                        "RWPermissions": ["massimo.cuscuna@nanotec.cnr.it"],
+                        "ROPermissions": [],
+                    }
+                ]
+
+            def list_users(self, structure):
+                return ["massimo.cuscuna@nanotec.cnr.it"]
+
+            def get_user_info(self, structure, username):
+                return {"RWBuckets": [], "ROBuckets": []}
+
+        stats = refresh_local_cache(tenant, client=SyncClient())
+
+        bucket = Bucket.objects.get(name="massimo-cuscuna-bucket01", tenant=tenant)
+        self.assertEqual(stats["orphan_permissions_cleared"], 1)
+        self.assertEqual(BucketPermission.objects.filter(bucket=bucket).count(), 0)
+
     def test_refresh_clears_stale_uo_from_read_only_membership(self):
         tenant, _ = Tenant.objects.update_or_create(
             code="NFFADI",
@@ -1200,3 +1576,86 @@ class SyncServiceTests(TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "not initialized"):
             fetch_mgmt_keys(tenant, client=UninitializedClient())
+
+
+class CryptoServiceTests(TestCase):
+    @override_settings(SECRET_KEY="test-secret-key-for-crypto-roundtrip")
+    def test_encrypt_decrypt_roundtrip(self):
+        from storage.services.crypto import decrypt_if_needed, encrypt_if_needed, is_encrypted
+
+        plain = "transient-s3-secret-value"
+        encrypted = encrypt_if_needed(plain)
+        self.assertTrue(is_encrypted(encrypted))
+        self.assertNotEqual(encrypted, plain)
+        self.assertEqual(decrypt_if_needed(encrypted), plain)
+
+    @override_settings(SECRET_KEY="crypto-tamper-test-key")
+    def test_decrypt_tampered_ciphertext_returns_empty(self):
+        from storage.services.crypto import decrypt_if_needed, encrypt_if_needed
+
+        encrypted = encrypt_if_needed("credential-value")
+        tampered = encrypted[:-2] + "xx"
+        self.assertEqual(decrypt_if_needed(tampered), "")
+
+
+@override_settings(
+    RGWSQUARED_URL="http://rgw",
+    RGWSQUARED_USERNAME="admin",
+    RGWSQUARED_PASSWORD="secret",
+)
+class RGWSquaredUserCreateTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="genome_user",
+            email="genome@example.com",
+            external_id="sub-genome",
+        )
+        self.tenant = Tenant.objects.create(
+            code="GENOME",
+            name="Genome",
+            rgwsquared_structure="GENOME",
+        )
+
+    def test_auto_provision_calls_user_create_for_optional_tenant(self):
+        from storage.pipeline import _sync_rgwsquared_user_access
+
+        created = []
+
+        class Client:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def list_users(self, structure):
+                return []
+
+            def create_user(self, structure, ceph_username):
+                created.append((structure, ceph_username))
+                return {}
+
+        with patch("storage.services.rgw_squared.RGWSquaredClient", Client):
+            result = _sync_rgwsquared_user_access(
+                self.user, "genome_user", self.tenant, required=False
+            )
+
+        self.assertTrue(result)
+        self.assertEqual(created, [("GENOME", "genome_user")])
+
+    def test_required_tenant_does_not_call_user_create(self):
+        from storage.pipeline import _sync_rgwsquared_user_access
+
+        class Client:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def list_users(self, structure):
+                return []
+
+            def create_user(self, structure, ceph_username):
+                raise AssertionError("userCreate must not run when required=True")
+
+        with patch("storage.services.rgw_squared.RGWSquaredClient", Client):
+            result = _sync_rgwsquared_user_access(
+                self.user, "genome_user", self.tenant, required=True
+            )
+
+        self.assertFalse(result)

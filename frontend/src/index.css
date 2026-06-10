@@ -296,16 +296,16 @@ body {
    ============================================================================ */
 
 .bucket-detail-container {
-  max-width: 1200px;
+  max-width: min(96vw, 1550px);
   margin: 0 auto;
-  padding: 2rem;
+  padding: 1.5rem 1.25rem;
 }
 
 .bucket-detail-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 2rem;
+  margin-bottom: 1.25rem;
 }
 
 .breadcrumb {
@@ -325,16 +325,123 @@ body {
   gap: 1rem;
 }
 
+.toolbar-cluster {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.btn-compact {
+  font-size: 0.78rem;
+  padding: 0.25rem 0.6rem;
+  white-space: nowrap;
+}
+
+.file-actions-menu {
+  position: relative;
+  display: inline-block;
+}
+
+.file-actions-trigger {
+  font-size: 0.78rem;
+  padding: 0.25rem 0.55rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  background: #fff;
+  color: #334155;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.file-actions-trigger:hover {
+  background: #f8fafc;
+}
+
+.file-actions-dropdown {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.2rem);
+  min-width: 7.5rem;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  z-index: 20;
+  overflow: hidden;
+}
+
+.file-actions-item {
+  display: block;
+  width: 100%;
+  padding: 0.35rem 0.75rem;
+  border: none;
+  background: none;
+  text-align: left;
+  font-size: 0.8rem;
+  color: #334155;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.file-actions-item:hover {
+  background: #f1f5f9;
+}
+
+.file-actions-item-danger {
+  color: #b91c1c;
+}
+
+.file-actions-item-danger:hover {
+  background: #fef2f2;
+}
+
+.admin-user-inline {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+
+.naming-rules-panel {
+  margin-bottom: 0.5rem;
+  border: 1px solid #bae6fd;
+  border-radius: 6px;
+  overflow: hidden;
+  font-size: 0.8rem;
+  color: #0369a1;
+}
+
+.naming-rules-toggle {
+  width: 100%;
+  padding: 0.45rem 0.75rem;
+  background: #f0f9ff;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.8rem;
+  color: #0369a1;
+}
+
+.naming-rules-body {
+  padding: 0.5rem 0.75rem;
+  background: #f8fcff;
+  border-top: 1px solid #bae6fd;
+}
+
 .files-table-container {
   background: white;
   border-radius: 8px;
   overflow: hidden;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+  border: 1px solid #e5e7eb;
+  box-shadow: none;
 }
 
 .files-table {
   width: 100%;
   border-collapse: collapse;
+  font-size: 0.85rem;
 }
 
 .files-table thead {
@@ -343,13 +450,13 @@ body {
 }
 
 .files-table th {
-  padding: 1rem;
+  padding: 0.45rem 0.75rem;
   text-align: left;
   font-weight: 500;
 }
 
 .files-table td {
-  padding: 1rem;
+  padding: 0.45rem 0.75rem;
   border-bottom: 1px solid #eee;
 }
 
@@ -360,6 +467,51 @@ body {
 .file-name {
   font-weight: 500;
   color: #2c3e50;
+  max-width: 0;
+  width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.files-table-container--detail {
+  overflow-x: auto;
+}
+
+.files-table--detail {
+  table-layout: auto;
+  width: 100%;
+}
+
+.files-table--detail .file-name {
+  width: auto;
+  max-width: none;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+.files-table--detail .files-col-size,
+.files-table--detail .files-col-modified {
+  white-space: nowrap;
+}
+
+.files-table--detail .files-col-uploader {
+  max-width: 11rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.files-table--detail .files-col-actions {
+  width: 4.5rem;
+  white-space: nowrap;
+}
+
+@media (max-width: 900px) {
+  .files-col-uploader {
+    display: none;
+  }
 }
 
 .file-count {
@@ -456,6 +608,16 @@ body {
 
 .button-delete-small:hover {
   background: #c0392b;
+}
+
+.toolbar-cluster .button-primary,
+.toolbar-cluster .button-secondary,
+.toolbar-cluster .button-delete-small,
+.toolbar-cluster label.button-primary {
+  font-size: 0.78rem;
+  padding: 0.3rem 0.65rem;
+  border-radius: 4px;
+  line-height: 1.25;
 }
 
 /* Messages */
@@ -852,6 +1014,19 @@ body {
 .admin-type-local {
   background: #dbeafe;
   color: #1e40af;
+}
+
+.admin-orphan-badge {
+  display: inline-block;
+  margin-left: 0.35rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  vertical-align: middle;
+  background: #fef3c7;
+  color: #92400e;
 }
 
 .admin-sync-section {

@@ -2,6 +2,8 @@
 
 A web application for managing S3 buckets on **Ceph RADOS Gateway (RGW)**, deployed on **Kubernetes (K3s)**. Built with Django REST Framework, React, nginx, PostgreSQL, Authentik OAuth2/OIDC, and the RGWSquared integration used by the storage platform.
 
+**Live deployment:** [https://buckets-explorer.areasciencepark.it/](https://buckets-explorer.areasciencepark.it/)
+
 ## Architecture
 
 ```mermaid
@@ -94,14 +96,12 @@ RGWSquared is currently private because it is tightly coupled to ORFEO-specific 
 
 ## Further Documentation
 
-- [RGWSquared API guide](docs/rgwsquared-api.md) documents the stable webapp-facing RGWSquared calls with sanitized curl examples.
-- [Maintainer guide](docs/bucket-explorer-maintainer-guide.md) explains tenant routing, identity fields, bucket naming, file naming, admin workflows, and the Django data model.
-- [Database schema](docs/database-schema.html) is a standalone visual ERD for the current Django models; [PDF export](docs/database-schema.pdf) is included for review and sharing.
-- [API documentation guide](docs/api-documentation.md) explains the drf-spectacular / Swagger UI setup and how to access interactive API docs in development and production.
-- [Production deployment guide](docs/production-deployment.md) explains how to deploy the webapp to a real Kubernetes cluster, including configuration requirements, the deployment sequence, and container image ownership.
-- [UO code tenants](docs/uo-code-tenants.md) explains how to configure institutional UO codes for tenants where users from different research institutions share storage and need provenance in bucket names.
-- [Development environment overview](docs/dev-environment-overview.md) describes the Stencil virtual datacenter used for development and how the application fits into it.
-- [Development environment setup](docs/dev-environment-setup.md) is a step-by-step guide for reproducing the development environment from scratch.
+See [docs/README.md](docs/README.md) for the full index. Highlights:
+
+- **Get started:** [Development environment setup](docs/dev-environment-setup.md), [overview](docs/dev-environment-overview.md)
+- **Maintain:** [Maintainer guide](docs/bucket-explorer-maintainer-guide.md), [Testing and CI](docs/testing-and-ci.md), [RGWSquared API](docs/rgwsquared-api.md)
+- **Deploy:** [Production deployment and operations](docs/production-deployment.md), [API docs](docs/api-documentation.md)
+- **Reference:** [Database schema](docs/database-schema.html), [UO code tenants](docs/uo-code-tenants.md)
 
 ## Infrastructure Context
 
@@ -109,11 +109,8 @@ This project was developed and validated in the **[Stencil](https://gitlab.com/a
 
 ## Quick Start
 
-> [!WARNING]
-> ⚠️ **Environment-specific scripts:** [k8s/infra.sh](k8s/infra.sh) and [k8s/app.sh](k8s/app.sh) are calibrated for the development K3s cluster and registry defaults. Review namespace, node addressing, kubeconfig, registry, and port-forward assumptions before reusing them elsewhere.
-
 > [!NOTE]
-> **Setting up the environment for the first time?** The commands below assume a provisioned K3s cluster, Ceph RGW endpoint, and Authentik identity provider. If you are starting from scratch, follow the [Development Environment Setup Guide](docs/dev-environment-setup.md) first.
+> **First time?** Follow the [Development Environment Setup Guide](docs/dev-environment-setup.md) to provision K3s, Ceph RGW, and Authentik. The Quick Start below assumes that foundation exists. For production, use the [Production deployment guide](docs/production-deployment.md).
 
 ### Prerequisites
 
@@ -171,11 +168,13 @@ kubectl port-forward -n bucket-explorer svc/frontend-service 3000:80
 kubectl port-forward -n authentik-bucket-explorer svc/authentik-service 9000:9000
 ```
 
-**Step 2 — If the deployment host is remote, create SSH local forwards from your workstation:**
+**Step 2 — From your laptop, tunnel to the deployment host** (development host alias: `orfeo-vm`):
 
 ```bash
-ssh -L 3000:127.0.0.1:3000 -L <auth-local-port>:127.0.0.1:<auth-service-port> <deployment-host>
+ssh -L 3000:localhost:3000 -L 9000:localhost:9000 orfeo-vm
 ```
+
+Or run `./app.sh access` on the deployment host—it prints the same SSH command and starts port-forwards automatically.
 
 **Step 3 — Open browser:**
 
@@ -281,7 +280,7 @@ s3bucket_manager_app/
 │   ├── Containerfile               # Container image definition
 │   ├── settings.py                 # S3_*, OAuth2, JWT configuration
 │   ├── urls.py                     # API route definitions
-│   ├── requirements.txt            # Python dependencies
+│   ├── pyproject.toml              # Python dependencies (PEP 621)
 │   └── storage/                    # Main Django app
 │       ├── models.py               # User (federation-ready) + Bucket models
 │       ├── views/                  # Auth, bucket, and admin API endpoints
@@ -372,7 +371,7 @@ Set real values in `k8s/env/dev/*.local.yaml` (gitignored) or your external secr
 
 The repository stores source code, Kubernetes templates, dependency manifests, and lockfiles. Frontend generated artifacts are reproducible from `frontend/package-lock.json` with `npm ci` and `npm run build`; `k8s/app.sh` runs those commands automatically when it needs the generated directories for deployment.
 
-Backend dependencies are pinned in `backend/requirements.txt` and installed by `backend/Containerfile`. Frontend dependencies are locked in `frontend/package-lock.json`.
+Backend dependencies are pinned in `backend/pyproject.toml` and installed by `backend/Containerfile`. Frontend dependencies are locked in `frontend/package-lock.json`.
 
 ## Acknowledgements
 
