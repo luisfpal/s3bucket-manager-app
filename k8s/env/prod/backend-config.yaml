@@ -9,7 +9,7 @@ data:
   # - buckets-explorer.areasciencepark.it: required — HAProxy forwards the browser's Host header unchanged
   # - backend-service: required — K8s liveness/readiness probes send Host: backend-service (see 02-backend.yaml)
   # - localhost and 127.0.0.1 removed: not needed in prod; only useful for direct kubectl port-forward debugging
-  # See internal_docs/learning/19_ALLOWED_HOSTS_AND_DJANGO_SECURITY.md for full explanation.
+  # Django rejects requests whose Host header is not listed (HTTP 400). Include every hostname clients and probes use.
   DJANGO_ALLOWED_HOSTS: "REPLACE_WITH_PROD_ALLOWED_HOSTS,backend-service"
   DJANGO_LOG_LEVEL: "INFO"
   OAUTH_LOG_LEVEL: "INFO"

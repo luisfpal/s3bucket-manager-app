@@ -309,7 +309,7 @@ s3bucket_manager_app/
 └── README.md                       # This file
 ```
 
-> **Container images:** The current codebase builds and pushes images to `ghcr.io/luisfpal/buckets-explorer-{backend,frontend}` — the personal container registry of the original maintainer. `k8s/.env` (gitignored) holds the `GHCR_TOKEN` needed to push rebuilt images via `app.sh`. A new maintainer who takes over image publishing must create `k8s/.env` with `GHCR_TOKEN=<GitHub classic PAT with write:packages scope>` and update `GHCR_OWNER` near the top of `k8s/app.sh` to their own GitHub username or organisation. See the [Production deployment guide](docs/production-deployment.md) for details.
+> **Container images:** During development, images are built and pushed to `ghcr.io/luisfpal/buckets-explorer-{backend,frontend}` for full control and rapid iteration. `k8s/.env` (gitignored) holds the `GHCR_TOKEN` used by `app.sh`. Future maintainers must update `GHCR_OWNER` in `k8s/app.sh`, create their own `k8s/.env`, and point manifest `image:` fields at their registry. Coverage uploads use the same maintainer GitHub account on Codecov until a new project is linked. See the [Production deployment guide](docs/production-deployment.md) and [Testing and CI](docs/testing-and-ci.md).
 
 ## Operations Notes
 

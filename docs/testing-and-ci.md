@@ -50,23 +50,13 @@ Production deployment remains **manual** (`kubectl` ladder). See [production-dep
 
 ## Codecov setup (one-time)
 
-1. Link the repo at [codecov.io](https://codecov.io) (`luisfpal/s3bucket-manager-app`).
+1. Link the repo at [codecov.io](https://codecov.io) (this project currently uses `luisfpal/s3bucket-manager-app` for coverage uploads during development).
 2. Install the [Codecov GitHub App](https://github.com/apps/codecov) on the repository.
 3. Add repository secret `CODECOV_TOKEN` (Settings → Secrets → Actions) with the upload token from Codecov → Settings → General.
 
 After the first green CI run, open the Codecov dashboard for coverage history and line-level reports.
 
-## v1.0.0 publication checklist (manual)
-
-Completed by automation where noted:
-
-| Step | Status | Action |
-| --- | --- | --- |
-| Push `main` + tag `v1.0.0` to origin, personal, gitlab | Done | `707c3bd` on all remotes |
-| GitHub Actions `verify` on `main` | Done | [CI run](https://github.com/RitAreaSciencePark/s3bucket-manager-app/actions/runs/27247225393) |
-| Codecov upload token | **You** | Add `CODECOV_TOKEN` secret + install Codecov GitHub App (steps above) |
-| GitHub About + homepage | **You** | `gh auth login` then: `gh repo edit RitAreaSciencePark/s3bucket-manager-app --description "Web app for governed S3 bucket management on Ceph RGW via RGWSquared, deployed on Kubernetes." --homepage "https://buckets-explorer.areasciencepark.it/"` |
-| Zenodo DOI | **You** | [zenodo.org](https://zenodo.org) → GitHub → enable `RitAreaSciencePark/s3bucket-manager-app` → create GitHub Release `v1.0.0` → copy DOI into `CITATION.cff` and `README.md` |
+Future maintainers should point Codecov at their own GitHub organisation or fork and update the workflow token accordingly.
 
 ## Dev bash scripts vs GitHub Actions
 
@@ -78,7 +68,7 @@ Both paths should pass the same `verify` checks before deploy:
 | Build + push images | `./app.sh deploy --rebuild` or `./app.sh backend` | `deploy-dev` job |
 | Roll out to cluster | `kubectl` via tunnel/kubeconfig | `deploy-dev-k8s` on self-hosted runner |
 
-The self-hosted runner (`bucket-explorer-runner`) is installed with `k8s/ci.sh` and has in-cluster `kubectl` access. See private learning doc `internal_docs/learning/20_CICD_FROM_FIRST_PRINCIPLES.md` for architecture detail.
+The self-hosted runner (`bucket-explorer-runner`) is installed with `k8s/ci.sh` and has in-cluster `kubectl` access. It runs only the `deploy-dev-k8s` job after images are pushed to GHCR; the `verify` job uses GitHub-hosted `ubuntu-latest`.
 
 ## Before production image push
 

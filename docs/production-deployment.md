@@ -143,7 +143,7 @@ After Authentik is running:
 
 ## Container image ownership
 
-The manifests reference images at `ghcr.io/luisfpal/buckets-explorer-{backend,frontend}:latest`. These live in the personal container registry of the original maintainer. A team deploying Bucket Explorer on their own infrastructure should publish their own images.
+The manifests reference images at `ghcr.io/luisfpal/buckets-explorer-{backend,frontend}:latest`. That registry was used during development for full control and rapid iteration. A team deploying Bucket Explorer on their own infrastructure must publish their own images and update the manifests accordingly.
 
 To take ownership:
 

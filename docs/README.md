@@ -2,6 +2,14 @@
 
 Reading order for maintainers and operators.
 
+## Public documentation policy
+
+Files in `docs/` are **public**: they must be self-contained so another operator or maintainer can deploy, test, and understand the system without private notes.
+
+- Keep how-to guides, architecture, API contracts, and placeholder templates here.
+- Do not add release checklists, session todos, or links to local-only paths (`internal_docs/`, `PLAN.md`, agent instruction files).
+- Maintainer-specific registry or CI accounts may be documented when they reflect the current deployment, with a note that future teams must substitute their own.
+
 ## Get started
 
 | Document | Purpose |
