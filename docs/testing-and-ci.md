@@ -56,6 +56,18 @@ Production deployment remains **manual** (`kubectl` ladder). See [production-dep
 
 After the first green CI run, open the Codecov dashboard for coverage history and line-level reports.
 
+## v1.0.0 publication checklist (manual)
+
+Completed by automation where noted:
+
+| Step | Status | Action |
+| --- | --- | --- |
+| Push `main` + tag `v1.0.0` to origin, personal, gitlab | Done | `707c3bd` on all remotes |
+| GitHub Actions `verify` on `main` | Done | [CI run](https://github.com/RitAreaSciencePark/s3bucket-manager-app/actions/runs/27247225393) |
+| Codecov upload token | **You** | Add `CODECOV_TOKEN` secret + install Codecov GitHub App (steps above) |
+| GitHub About + homepage | **You** | `gh auth login` then: `gh repo edit RitAreaSciencePark/s3bucket-manager-app --description "Web app for governed S3 bucket management on Ceph RGW via RGWSquared, deployed on Kubernetes." --homepage "https://buckets-explorer.areasciencepark.it/"` |
+| Zenodo DOI | **You** | [zenodo.org](https://zenodo.org) → GitHub → enable `RitAreaSciencePark/s3bucket-manager-app` → create GitHub Release `v1.0.0` → copy DOI into `CITATION.cff` and `README.md` |
+
 ## Dev bash scripts vs GitHub Actions
 
 Both paths should pass the same `verify` checks before deploy:
