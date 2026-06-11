@@ -12,15 +12,17 @@ Run these from the **deployment host** (the machine that builds images and reach
 
 ```bash
 cd k8s
+./app.sh access          # SSH tunnel + creates /tmp/k3s-tunnel-kubeconfig.yaml if missing
 export KUBECONFIG=/tmp/k3s-tunnel-kubeconfig.yaml
-./app.sh access          # SSH tunnel + kubeconfig + port-forwards
 ./app.sh verify          # same tests/build gate as GitHub Actions CI
 ./app.sh deploy --rebuild   # build, push GHCR, apply manifests, roll out
 ```
 
+On a **first session**, `/tmp/k3s-tunnel-kubeconfig.yaml` does not exist yet — `./app.sh access` creates it (see [How the kubeconfig file is created](#how-the-kubeconfig-file-is-created)).
+
 | Command | What it does |
 | --- | --- |
-| `./app.sh access` | Opens SSH tunnel to the K3s API, ensures kubeconfig exists, starts `:3000` (app) and `:9000` (Authentik) forwards |
+| `./app.sh access` | Opens SSH tunnel to the K3s API, fetches and patches kubeconfig if missing, starts `:3000` (app) and `:9000` (Authentik) forwards |
 | `./app.sh verify` | Backend pytest + frontend `npm run build` |
 | `./app.sh deploy --rebuild` | Full deploy with fresh container images |
 
@@ -81,7 +83,29 @@ Every requirement below must pass before you deploy. Each row explains **what**,
 | **`k8s/env/dev/backend-config*.yaml`** | S3 endpoint, Authentik URLs, RGWSquared URL | `ls k8s/env/dev/backend-config.local.yaml` or `backend-config.yaml` | Copy template; set endpoints |
 | **`k8s/env/dev/infra-secrets*.yaml`** | Authentik bootstrap secrets | `ls k8s/env/dev/infra-secrets.local.yaml` or `infra-secrets.yaml` | Copy template; fill secrets |
 | **Authentik running** | Backend init waits for Authentik; login needs OAuth | `kubectl get deploy authentik-server -n authentik-bucket-explorer` → `READY 1/1` | `./infra.sh deploy` |
-| **Kubeconfig + tunnel** | `kubectl` must reach the API | `./app.sh access` then `kubectl cluster-info` | See [Cluster access and kubeconfig](#cluster-access-and-kubeconfig) |
+| **Kubeconfig file + API tunnel** | `kubectl` and deploy scripts must reach the K3s API | `./app.sh access` then `test -f /tmp/k3s-tunnel-kubeconfig.yaml && kubectl cluster-info` | Run `./app.sh access`; see [How the kubeconfig file is created](#how-the-kubeconfig-file-is-created) |
+
+### How the kubeconfig file is created
+
+You **do not** generate `/tmp/k3s-tunnel-kubeconfig.yaml` by hand in normal use. `./app.sh access` creates it when the file is missing:
+
+1. Opens an SSH tunnel: `localhost:16443` → K3s API on the node (`6443`)
+2. Copies `/etc/rancher/k3s/k3s.yaml` from the K3s node via `scp`
+3. Patches the API URL from `https://127.0.0.1:6443` to `https://127.0.0.1:16443` so `kubectl` uses the tunnel
+
+| Question | Answer |
+| --- | --- |
+| **First session — file missing?** | Run `./app.sh access` before `export KUBECONFIG=...` |
+| **Where does it live?** | `/tmp/k3s-tunnel-kubeconfig.yaml` (ephemeral; survives until deleted or host reboot clears `/tmp`) |
+| **When to recreate?** | File missing, tunnel down, or cert errors after cluster re-init — run `./app.sh access` again, or delete the file and re-run `access` |
+| **Manual fallback?** | [Manual fallback](#manual-fallback) below (tunnel + `scp` + `sed`) |
+| **Which node IP?** | `./app.sh access` uses `K3S_NODES[0]` in [`k8s/app.sh`](../k8s/app.sh); manual examples use placeholder `<kube01-ip>` (e.g. `198.51.100.10` in docs) |
+
+After `access`, export the path in **every new shell** where you run manual `kubectl`:
+
+```bash
+export KUBECONFIG=/tmp/k3s-tunnel-kubeconfig.yaml
+```
 
 ### GHCR token setup
 
@@ -133,7 +157,7 @@ K3s listens on port **6443** on the node. In many lab setups that port is **not 
 deployment host :16443  ──SSH tunnel──►  kube01 :6443  (K3s API)
 ```
 
-`./app.sh access` creates the tunnel, fetches kubeconfig from the node, and rewrites the API URL to `https://127.0.0.1:16443`.
+`./app.sh access` creates the tunnel, **creates** `/tmp/k3s-tunnel-kubeconfig.yaml` if it is missing (via `scp` + `sed`), and rewrites the API URL to `https://127.0.0.1:16443`. See [How the kubeconfig file is created](#how-the-kubeconfig-file-is-created).
 
 | Path | Purpose |
 | --- | --- |
@@ -227,8 +251,8 @@ export KUBECONFIG=/tmp/k3s-tunnel-kubeconfig.yaml
 
 ```bash
 cd k8s
-export KUBECONFIG=/tmp/k3s-tunnel-kubeconfig.yaml
 ./app.sh access
+export KUBECONFIG=/tmp/k3s-tunnel-kubeconfig.yaml
 ./app.sh status
 ```
 
@@ -284,6 +308,7 @@ See [Storage cache and redeploy](storage-cache-and-redeploy.md) for the three-la
 
 ```bash
 cd k8s
+./app.sh access
 export KUBECONFIG=/tmp/k3s-tunnel-kubeconfig.yaml
 ./app.sh cleanup          # deletes bucket-explorer namespace (includes DB PVC)
 ./app.sh deploy --rebuild
@@ -411,7 +436,8 @@ Did you change code?
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| `Kubeconfig not found` | No tunnel session yet | `./app.sh access` |
+| `Kubeconfig not found: /tmp/k3s-tunnel-kubeconfig.yaml` | File not created yet (first session) or deleted | `./app.sh access` — do not create an empty file by hand |
+| `Kubeconfig not found` (other path) | Wrong `KUBECONFIG` or no tunnel session | `./app.sh access`; then `export KUBECONFIG=/tmp/k3s-tunnel-kubeconfig.yaml` |
 | `Cannot connect to K3s` | SSH tunnel down | `./app.sh access`; check SSH to kube01 |
 | `GHCR_TOKEN is not set` | Missing `k8s/.env` | Copy `.env.example` → `.env` |
 | `Login Succeeded` missing on push | Invalid or expired PAT | Regenerate token with `write:packages` |

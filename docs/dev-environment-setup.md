@@ -372,14 +372,16 @@ This file is gitignored. `app.sh` sources it automatically for `podman push` and
 
 ## Step 8: K8s API Access Tunnel
 
+This step produces **`/tmp/k3s-tunnel-kubeconfig.yaml`** — the patched kubeconfig file used by all deploy scripts and documented in [Development deployment operations](dev-deployment-operations.md#how-the-kubeconfig-file-is-created). You do not create it manually in normal use.
+
 K3s exposes its API on port 6443, which is firewalled on the VMs — a direct `kubectl` from the deployment host will fail. Access requires an SSH tunnel that forwards a local port to the K3s API on the VM.
 
-**In normal use, run `./app.sh access` at the start of each session.** It sets up the SSH tunnel, fetches and patches the kubeconfig, and starts port-forwards for the frontend and Authentik — all in one command.
+**In normal use, run `./app.sh access` at the start of each session.** It sets up the SSH tunnel, fetches and patches the kubeconfig (if the file is missing), and starts port-forwards for the frontend and Authentik — all in one command.
 
 ```bash
+cd k8s
+./app.sh access          # creates /tmp/k3s-tunnel-kubeconfig.yaml if missing
 export KUBECONFIG=/tmp/k3s-tunnel-kubeconfig.yaml
-cd /root/s3bucket_manager_app/k8s
-./app.sh access
 kubectl cluster-info   # should print API at 127.0.0.1:16443
 ```
 
@@ -504,10 +506,10 @@ virsh list --all | grep -E "kube|ceph|ipa"
 ssh root@198.51.100.90 "ceph -s"
 kubectl get nodes
 
-# 3. Establish access tunnel + port-forwards
-export KUBECONFIG=/tmp/k3s-tunnel-kubeconfig.yaml
-cd /root/s3bucket_manager_app/k8s
+# 3. Establish access tunnel + port-forwards (creates kubeconfig if missing)
+cd k8s
 ./app.sh access
+export KUBECONFIG=/tmp/k3s-tunnel-kubeconfig.yaml
 
 # 4. Open http://localhost:3000
 ```

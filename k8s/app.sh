@@ -64,8 +64,9 @@
 #
 # PREREQUISITES:
 #   - k8s/.env with GHCR_TOKEN (classic PAT, write:packages scope)
-#   - SSH tunnel to K3s API running, or let 'access' set it up
-#   - KUBECONFIG set to /tmp/k3s-tunnel-kubeconfig.yaml (default)
+#   - Run './app.sh access' once per session (or when /tmp/k3s-tunnel-kubeconfig.yaml
+#     is missing) before deploy — it creates the SSH tunnel and kubeconfig file
+#   - KUBECONFIG set to /tmp/k3s-tunnel-kubeconfig.yaml (default; export in new shells)
 #   - Environment overlays in k8s/env/<env>/
 #   - Authentik running in authentik-bucket-explorer namespace (deployed by infra.sh)
 #
