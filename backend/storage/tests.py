@@ -8,7 +8,7 @@ from django.contrib.sessions.backends.db import SessionStore
 from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
-from django.test import TestCase, override_settings
+from django.test import Client, TestCase, override_settings
 from django.urls import Resolver404, resolve
 from rest_framework.test import APIRequestFactory, force_authenticate
 
@@ -1659,3 +1659,49 @@ class RGWSquaredUserCreateTests(TestCase):
             )
 
         self.assertFalse(result)
+
+
+@override_settings(AUTHENTIK_ADMIN_GROUP=ADMIN_GROUP, DEBUG=True)
+class ApiDocumentationAccessTests(TestCase):
+    """OpenAPI schema and Swagger UI are admin-only in all environments."""
+
+    def setUp(self):
+        self.client = Client()
+        self.admin = User.objects.create_user(
+            username="docs-admin",
+            email="docs-admin@example.com",
+            external_id="sub-docs-admin",
+            password="unused",
+            is_staff=True,
+            is_approved=True,
+            idp_source="authentik",
+        )
+        self.regular = User.objects.create_user(
+            username="docs-user",
+            email="docs-user@example.com",
+            external_id="sub-docs-user",
+            password="unused",
+            is_staff=False,
+            is_approved=True,
+            idp_source="authentik",
+        )
+        link_authentik_user(self.admin)
+        link_authentik_user(self.regular, groups=[])
+
+    def test_anonymous_denied_schema_and_docs(self):
+        for path in ("/api/schema/", "/api/docs/", "/api/redoc/"):
+            response = self.client.get(path)
+            # JWT auth advertises Bearer, so DRF may return 401 instead of 403.
+            self.assertIn(response.status_code, (401, 403), path)
+
+    def test_non_staff_denied_schema_and_docs(self):
+        self.client.force_login(self.regular)
+        for path in ("/api/schema/", "/api/docs/", "/api/redoc/"):
+            response = self.client.get(path)
+            self.assertEqual(response.status_code, 403, path)
+
+    def test_staff_session_allowed_schema_and_docs(self):
+        self.client.force_login(self.admin)
+        self.assertEqual(self.client.get("/api/schema/").status_code, 200)
+        self.assertEqual(self.client.get("/api/docs/").status_code, 200)
+        self.assertEqual(self.client.get("/api/redoc/").status_code, 200)

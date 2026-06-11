@@ -17,10 +17,42 @@ For the full development topology (virtual machines, IP layout, networking), see
 You need:
 
 - A Kubernetes cluster where you have permission to create the `bucket-explorer` namespace
+- A **kubeconfig** for that cluster on the machine where you run `kubectl` and apply manifests (see [Kubernetes access (kubeconfig)](#kubernetes-access-kubeconfig))
 - An Authentik instance already running, **or** willingness to deploy one (see [Scenario B](#scenario-b--no-existing-authentik))
 - OIDC client credentials from the Authentik administrator
 - Ceph RGW endpoint URL and RGWSquared service credentials
 - A container registry reachable by your cluster nodes (see [Container image ownership](#container-image-ownership))
+
+---
+
+## Kubernetes access (kubeconfig)
+
+Production operators need a kubeconfig file issued by the platform or cluster team. It is the same concept as in development: a file that tells `kubectl` **where** the API server is and **how** to authenticate.
+
+Typical setup on the operator workstation:
+
+```bash
+# Path chosen by your platform team — store outside Git, mode 600
+export KUBECONFIG=/absolute/path/to/prod-kubeconfig.yaml
+
+kubectl config current-context
+kubectl get ns bucket-explorer
+kubectl auth can-i create deployments -n bucket-explorer
+```
+
+All three commands must succeed before you apply manifests or roll out image updates.
+
+| Check | Pass criteria |
+|-------|----------------|
+| `kubectl config current-context` | Points at the intended production cluster (not a dev context) |
+| `kubectl get ns bucket-explorer` | Namespace exists or you have permission to create it |
+| `kubectl auth can-i create deployments -n bucket-explorer` | `yes` |
+
+**Network access:** Production API servers are usually reachable only from an institutional VPN or bastion — the same role the dev SSH tunnel plays in [dev-environment-setup.md](dev-environment-setup.md#step-8-k8s-api-access-tunnel), but with your organization's production networking instead of `localhost:16443`.
+
+**Session habit:** Export `KUBECONFIG` in every shell (or merge the production context into `~/.kube/config` with `kubectl config use-context`). Deployment scripts and CI jobs must set `KUBECONFIG` explicitly when they are not using the default kubeconfig path.
+
+**Security:** Never commit kubeconfig files. Treat them like passwords (file mode `600`, store in a secrets manager or secure home directory).
 
 ---
 

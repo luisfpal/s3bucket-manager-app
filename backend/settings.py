@@ -184,16 +184,14 @@ SPECTACULAR_SETTINGS = {
     "COMPONENT_SPLIT_REQUEST": True,
     # Strip the /api/ prefix from schema path prefixes for cleaner display.
     "SCHEMA_PATH_PREFIX": "/api/",
-    # Access control for the schema and docs endpoints:
-    # - DEV (DEBUG=True): open access — any visitor can read the schema
-    # - PROD (DEBUG=False): restricted to is_staff users (Authentik admin group)
-    #   This prevents the full endpoint map from being public attack-surface intelligence.
-    #   Access: /admin/login → Authentik → admin JWT → use "Authorize" in Swagger UI.
-    "SERVE_PERMISSIONS": (
-        ["rest_framework.permissions.AllowAny"]
-        if DEBUG
-        else ["rest_framework.permissions.IsAdminUser"]
-    ),
+    # Access control: admin-only in all environments (is_staff synced from AUTHENTIK_ADMIN_GROUP).
+    # Sign in at /admin/login first so the session cookie is sent to /api/docs/.
+    "SERVE_PERMISSIONS": ["rest_framework.permissions.IsAdminUser"],
+    # Session first for /admin/login browser flow; JWT for curl/API clients.
+    "SERVE_AUTHENTICATION": [
+        "rest_framework.authentication.SessionAuthentication",
+        "rest_framework_simplejwt.authentication.JWTAuthentication",
+    ],
 }
 
 # JWT
