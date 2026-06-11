@@ -430,10 +430,10 @@ cp env/dev/backend-config.yaml env/dev/backend-config.local.yaml
 #   OIDC_CLIENT_ID, OIDC_APPLICATION_SLUG: leave as-is; configure_authentik.py sets these
 
 # Deploy Authentik (identity layer) — uses infra-secrets.local.yaml
-./infra.sh deploy --env dev
+./infra.sh deploy
 
 # Build and deploy the application — uses app-secrets.local.yaml + backend-config.local.yaml
-./app.sh deploy --env dev --rebuild
+./app.sh deploy --rebuild
 ```
 
 The scripts wait for pods to become healthy before continuing. After a successful deploy:
@@ -452,6 +452,8 @@ ssh -L 3000:localhost:3000 -L 9000:localhost:9000 orfeo-vm
 ```
 
 Then open `http://localhost:3000`. `./app.sh access` on the deployment host prints this command when setup completes.
+
+> **Ongoing operations:** For day-to-day deploy, code updates, kubeconfig, and command reference, see [Development deployment operations](dev-deployment-operations.md).
 
 ---
 

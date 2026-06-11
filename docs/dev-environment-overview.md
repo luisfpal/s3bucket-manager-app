@@ -189,27 +189,16 @@ Container images are published to the **GitHub Container Registry** (`ghcr.io/lu
 
 This replaced the local Stencil registry (`registry.stencil.com:5000`) used in the original Stencil setup. GHCR was chosen because images are accessible from any environment — production K3s nodes can pull the same image as development nodes without configuring a registry mirror.
 
-### GitHub Actions Runners (ARC)
+### GitHub Actions (verify only)
 
-The repository includes a CI/CD pipeline (`.github/workflows/ci.yml`) that runs tests on every push/PR and automatically builds and deploys to the dev cluster when code is pushed to the `dev` branch.
+The repository workflow [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs **verify** on every push/PR to `main`: pytest, frontend build, and optional Codecov upload. It does **not** deploy.
 
-The pipeline has two jobs:
+Dev deploy is manual on the operator host — see [Development deployment operations](dev-deployment-operations.md).
 
-```
-Push to dev
-  │
-  ▼
-Job 1: Build (GitHub-hosted ubuntu-latest runner)
-  │  docker build backend, frontend → push to GHCR
-  ▼
-Job 2: Deploy (self-hosted runner inside K3s)
-  │  kubectl apply manifests
-  │  kubectl rollout restart
-  ▼
-  New pods pull fresh images from GHCR and roll out
-```
+### GitHub Actions Runners (ARC, optional)
 
-The self-hosted runner is deployed inside K3s using **ARC** (Actions Runner Controller), a Kubernetes operator that manages GitHub Actions runner pods. ARC is installed via `k8s/ci.sh`. The runner pod uses a ServiceAccount bound to the minimum RBAC permissions needed to deploy to the `bucket-explorer` namespace only.
+**ARC** (Actions Runner Controller) can install a self-hosted runner inside K3s via `k8s/ci.sh` (requires `GITHUB_PAT` with `repo` scope). Optional; not required for green CI or day-to-day dev when you deploy with `app.sh`.
+
 
 ---
 
